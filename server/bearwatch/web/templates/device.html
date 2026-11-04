@@ -19,13 +19,29 @@
 </form>
 <span class="muted">The agent picks this up at its next heartbeat (within 15 minutes).</span>
 
+<div class="card">
+  <h3>Importance and exposure</h3>
+  <p class="muted">These scale the risk score of every finding on this device.</p>
+  <form method="post" action="/devices/{{ dev.id }}/settings" class="form-row">
+    <label>Importance
+      <select name="criticality">
+        <option value=""{% if dev.criticality is none %} selected{% endif %}>Default: {{ importance }}, {{ importance_label[importance] }}</option>
+        {% for n, text in importance_label.items() %}<option value="{{ n }}"{% if dev.criticality == n %} selected{% endif %}>{{ n }}, {{ text }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" name="internet_facing" value="true"{% if dev.internet_facing %} checked{% endif %}> Reachable from the internet</label>
+    <button class="btn" type="submit">Save</button>
+  </form>
+</div>
+
 <h2>Fixes for this device</h2>
 {% if fixes %}
 <div class="card">
 {% for f in fixes %}
   <details{% if loop.first %} open{% endif %}>
-    <summary><span class="grow">{{ f.label }}</span>{{ m.tier(f.tier) }}<span class="muted">{{ f.cves }} CVE{{ "s" if f.cves != 1 }}</span></summary>
-    {{ m.cve_table(by_fix[f.fix_key][:50]) }}
+    <summary><span class="grow">{{ f.label }}</span>{% if f.overdue %}<span class="badge bad">Overdue</span>{% endif %}{{ m.tier(f.tier) }}<span class="muted">Risk {{ f.risk | risk }}, {{ f.cves }} CVE{{ "s" if f.cves != 1 }}</span></summary>
+    {{ m.cve_table(by_fix[f.fix_key][:50], why=why, excs=excs, dev=dev) }}
+    <p><a href="/exceptions/new?device={{ dev.id }}&amp;fix={{ quote(f.fix_key) }}">Add an exception for this whole fix on {{ dev.hostname }}</a></p>
     {% if by_fix[f.fix_key] | length > 50 %}<p class="muted">Showing the 50 most urgent. <a href="/fix?key={{ quote(f.fix_key) }}&amp;client={{ client.id }}">See all {{ by_fix[f.fix_key] | length }} on the fix page</a>.</p>{% endif %}
   </details>
 {% endfor %}

@@ -226,6 +226,9 @@ class Device(Base):
     rescan_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     wua_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     wua_error: Mapped[str | None] = mapped_column(Text)
+    # Set by a technician. None means the default (4 for servers, 3 otherwise); see scoring.py.
+    criticality: Mapped[int | None] = mapped_column(Integer)
+    internet_facing: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     __table_args__ = (UniqueConstraint("site_id", "machine_guid"),)
 
@@ -290,8 +293,37 @@ class Finding(Base):
     first_seen: Mapped[datetime] = mapped_column(DateTime)
     last_seen: Mapped[datetime] = mapped_column(DateTime)
     fixed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Triage (Phase 2), written by scoring.rescore. opened_at restarts the fix deadline when a
+    # fixed finding comes back; due_at follows the current tier and CVSS.
+    opened_at: Mapped[datetime] = mapped_column(DateTime)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    risk: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    exception_id: Mapped[int | None] = mapped_column(ForeignKey("finding_exception.id", ondelete="SET NULL"), index=True)
 
     __table_args__ = (UniqueConstraint("device_id", "source", "subject_key", "cve_id"),)
+
+
+class FindingException(Base):
+    """A technician's decision about findings that match it, with a reason and an end date.
+
+    Scope: one client, optionally one device, and a fix, a CVE, or both. Only false positive and
+    compensating control lower the risk score. Every exception expires; then the findings are
+    scored and given deadlines as if it never existed.
+    """
+
+    __tablename__ = "finding_exception"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("client.id", ondelete="CASCADE"), index=True)
+    device_id: Mapped[int | None] = mapped_column(ForeignKey("device.id", ondelete="CASCADE"), index=True)
+    fix_key: Mapped[str | None] = mapped_column(String(220))
+    cve_id: Mapped[str | None] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(String(24))  # false_positive | compensating_control | risk_accepted | planned_fix
+    note: Mapped[str] = mapped_column(Text)
+    expires_on: Mapped[date] = mapped_column(Date)  # last day it applies
+    created_by: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    revoked_by: Mapped[str | None] = mapped_column(String(200))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class FindingEvent(Base):

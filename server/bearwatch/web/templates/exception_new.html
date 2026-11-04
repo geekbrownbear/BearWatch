@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}New exception · BearWatch{% endblock %}
+{% block main %}
+<div class="narrow">
+<p class="eyebrow">{{ scope.client.name }}</p>
+<h1>Add an exception</h1>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+
+<div class="card">
+  <p>Covers {{ m.scope_text(scope.client, scope.device, scope.fix_label, scope.fix_key, scope.cve_id) }}.</p>
+  <p class="muted">{{ scope.matching }} open finding{{ "s" if scope.matching != 1 }} match today. Findings that appear later and match are covered too, until the end date.</p>
+</div>
+
+<form method="post" action="/exceptions" class="card">
+  <input type="hidden" name="client" value="{{ scope.client.id }}">
+  {% if scope.device %}<input type="hidden" name="device" value="{{ scope.device.id }}">{% endif %}
+  {% if scope.fix_key %}<input type="hidden" name="fix" value="{{ scope.fix_key }}">{% endif %}
+  {% if scope.cve_id %}<input type="hidden" name="cve" value="{{ scope.cve_id }}">{% endif %}
+
+  <h3>Reason</h3>
+  <div class="radios">
+    <label><input type="radio" name="reason" value="false_positive" required> <span><strong>False positive.</strong> <span class="muted">The device is not affected. Risk drops to 0.</span></span></label>
+    <label><input type="radio" name="reason" value="compensating_control"> <span><strong>Compensating control.</strong> <span class="muted">Something else blocks the attack, such as a firewall rule or a disabled feature. Risk is halved.</span></span></label>
+    <label><input type="radio" name="reason" value="risk_accepted"> <span><strong>Risk accepted.</strong> <span class="muted">The client chose not to fix it for now. Risk is unchanged; the deadline is paused.</span></span></label>
+    <label><input type="radio" name="reason" value="planned_fix"> <span><strong>Planned fix.</strong> <span class="muted">It is scheduled, for example in the next maintenance window. Risk is unchanged; the deadline is paused.</span></span></label>
+  </div>
+
+  <label>Note (who decided, and why)
+    <textarea name="note" maxlength="2000" required></textarea>
+  </label>
+
+  <div class="form-row">
+    <label>Ends on
+      <input type="date" name="expires_on" value="{{ default_expiry.isoformat() }}" min="{{ today.isoformat() }}" max="{{ max_expiry.isoformat() }}" required>
+    </label>
+    <button class="btn" type="submit">Save exception</button>
+  </div>
+  <p class="muted">Every exception ends within a year. After the end date, the findings are scored and given deadlines again.</p>
+</form>
+</div>
+{% endblock %}

@@ -16,6 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .intel.common import utcnow
+from . import scoring
 from .match import apps, windows
 from .match.enrich import CveContext
 from .models import Device, DeviceKb, DeviceSoftware, Finding, FindingEvent, WingetPackage
@@ -111,12 +112,12 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
     for k, c in current.items():
         f = existing.get(k)
         if f is None:
-            f = Finding(device_id=dev.id, source=k[0], subject_key=k[1], cve_id=k[2], first_seen=now, status="open")
+            f = Finding(device_id=dev.id, source=k[0], subject_key=k[1], cve_id=k[2], first_seen=now, opened_at=now, status="open")
             s.add(f)
             events.append((f, "found"))
             counts["found"] += 1
         elif f.status == "fixed":
-            f.status, f.fixed_at = "open", None
+            f.status, f.fixed_at, f.opened_at = "open", None, now  # the fix deadline starts again
             events.append((f, "reopened"))
             counts["reopened"] += 1
         f.subject, f.subject_version, f.fix_key, f.fix_label, f.last_seen = c.subject[:400], c.subject_version, c.fix_key, c.fix_label, now
@@ -139,6 +140,7 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
     dev.match_error = "; ".join(errors) or None
     counts["open"] = len(current) + kept
     s.flush()
+    scoring.rescore(s, dev, now)
     return counts
 
 

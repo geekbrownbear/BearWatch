@@ -1,11 +1,14 @@
 """Server-rendered dashboard. No JavaScript framework; every page is one query-backed template.
 
 Findings are shown grouped by fix: one row per KB or app update, with the devices that need it
-and the CVEs it closes, because that is the unit a technician actually works in.
+and the CVEs it closes, because that is the unit a technician actually works in. Fixes and
+devices sort by risk score (scoring.py), and every score shows how it was reached.
 """
 
 import json
-from datetime import datetime, timedelta
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -16,11 +19,11 @@ from sqlalchemy import String, and_, case, cast, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import __version__, auth, tenants
+from .. import __version__, auth, scoring, tenants
 from ..config import get_settings
 from ..db import session_scope
 from ..intel.common import utcnow
-from ..models import Client, Device, DeviceSoftware, Finding, FindingEvent, Site, SyncState, WuaUpdate
+from ..models import Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, Site, SyncState, WuaUpdate
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -58,11 +61,27 @@ def health(dev: Device) -> tuple[str, str]:
     return "bad", "Silent"
 
 
+def deadline(f: Finding) -> tuple[str, str]:
+    """(css class, text) for an open finding's fix deadline."""
+    if f.exception_id is not None:
+        return "muted", "Paused by exception"
+    if f.due_at is None:
+        return "muted", "-"
+    days = (f.due_at - utcnow()).total_seconds() / 86400
+    if days < 0:
+        n = max(1, int(-days))
+        return "bad", f"Overdue {n} day{'s' if n != 1 else ''}"
+    n = int(days)
+    return ("warn" if n < 7 else ""), ("Due today" if n == 0 else f"Due in {n} day{'s' if n != 1 else ''}")
+
+
 TIER_LABEL = {1: "Exploited", 2: "Exploit code", 3: "Likely", 4: "No signal"}
 
-templates.env.globals.update(ago=ago, health=health, tier_label=TIER_LABEL, version=__version__, quote=quote)
+templates.env.globals.update(ago=ago, health=health, deadline=deadline, tier_label=TIER_LABEL, version=__version__, quote=quote,
+                             importance_label=scoring.IMPORTANCE_LABEL, reasons=scoring.REASONS)
 templates.env.filters["pct"] = lambda v: "-" if v is None else f"{v * 100:.1f}%"
 templates.env.filters["score"] = lambda v: "-" if v is None else f"{v:.1f}"
+templates.env.filters["risk"] = lambda v: "-" if v is None else f"{v:.0f}"
 
 
 def render(request: Request, name: str, user: str, **ctx) -> HTMLResponse:
@@ -73,7 +92,8 @@ def render(request: Request, name: str, user: str, **ctx) -> HTMLResponse:
 
 
 def fix_rows(s: Session, client_id: int | None = None, device_id: int | None = None, limit: int | None = None) -> list[dict]:
-    """Open findings grouped by fix, most urgent first."""
+    """Open findings grouped by fix, highest risk first."""
+    now = utcnow()
     q = (
         select(
             Finding.fix_key,
@@ -85,12 +105,15 @@ def fix_rows(s: Session, client_id: int | None = None, device_id: int | None = N
             func.count(distinct(case((Finding.kev.is_(True), Finding.cve_id)))).label("kev"),
             func.max(Finding.epss).label("epss"),
             func.max(Finding.cvss).label("cvss"),
+            func.max(Finding.risk).label("risk"),
+            func.count(distinct(case((scoring.overdue_clause(now), Finding.device_id)))).label("overdue"),
         )
         .join(Device, Device.id == Finding.device_id)
         .join(Site, Site.id == Device.site_id)
         .where(Finding.status == "open")
         .group_by(Finding.fix_key)
-        .order_by(func.min(Finding.exploit_tier), func.count(distinct(Finding.device_id)).desc(), func.count(distinct(Finding.cve_id)).desc())
+        .order_by(func.max(Finding.risk).desc(), func.min(Finding.exploit_tier), func.count(distinct(Finding.device_id)).desc(),
+                  func.count(distinct(Finding.cve_id)).desc(), Finding.fix_key)
     )
     if client_id is not None:
         q = q.where(Site.client_id == client_id)
@@ -104,15 +127,16 @@ def fix_rows(s: Session, client_id: int | None = None, device_id: int | None = N
 def device_rows(s: Session, client_id: int | None = None) -> list[dict]:
     open_count = func.count(Finding.id)
     q = (
-        select(Device, Site, open_count.label("open"), func.count(case((Finding.exploit_tier == 1, Finding.id))).label("exploited"))
+        select(Device, Site, open_count.label("open"), func.count(case((Finding.exploit_tier == 1, Finding.id))).label("exploited"),
+               func.max(Finding.risk).label("risk"), func.count(case((scoring.overdue_clause(utcnow()), Finding.id))).label("overdue"))
         .join(Site, Site.id == Device.site_id)
         .outerjoin(Finding, and_(Finding.device_id == Device.id, Finding.status == "open"))
         .group_by(Device.id, Site.id)
-        .order_by(func.count(case((Finding.exploit_tier == 1, Finding.id))).desc(), open_count.desc(), Device.hostname)
+        .order_by(func.max(Finding.risk).desc().nulls_last(), open_count.desc(), Device.hostname)
     )
     if client_id is not None:
         q = q.where(Site.client_id == client_id)
-    return [{"device": d, "site": site, "open": n, "exploited": x} for d, site, n, x in s.execute(q)]
+    return [{"device": d, "site": site, "open": n, "exploited": x, "risk": r, "overdue": o} for d, site, n, x, r, o in s.execute(q)]
 
 
 def client_rows(s: Session) -> list[dict]:
@@ -127,6 +151,7 @@ def client_rows(s: Session) -> list[dict]:
                 "silent": sum(1 for d in devs if health(d["device"])[0] == "bad"),
                 "open": sum(d["open"] for d in devs),
                 "exploited": sum(d["exploited"] for d in devs),
+                "overdue": sum(d["overdue"] for d in devs),
                 "top_fix": top[0] if top else None,
             }
         )
@@ -176,6 +201,7 @@ def overview(request: Request, user: str = Depends(auth.current_user)):
             "silent": sum(c["silent"] for c in clients),
             "open": sum(c["open"] for c in clients),
             "exploited": sum(c["exploited"] for c in clients),
+            "overdue": sum(c["overdue"] for c in clients),
         })
 
 
@@ -212,7 +238,10 @@ def device_page(request: Request, device_id: int, user: str = Depends(auth.curre
         site = s.get(Site, dev.site_id)
         client = s.get(Client, site.client_id)
         open_findings = s.scalars(select(Finding).where(Finding.device_id == device_id, Finding.status == "open")
-                                  .order_by(Finding.exploit_tier, Finding.epss.desc().nulls_last(), Finding.cve_id)).all()
+                                  .order_by(Finding.risk.desc(), Finding.exploit_tier, Finding.epss.desc().nulls_last(), Finding.cve_id)).all()
+        held = {f.exception_id for f in open_findings if f.exception_id}
+        excs = {e.id: e for e in s.scalars(select(FindingException).where(FindingException.id.in_(held)))} if held else {}
+        why = {f.id: scoring.breakdown(f, dev, excs.get(f.exception_id)) for f in open_findings}
         by_fix: dict[str, list[Finding]] = {}
         for f in open_findings:
             by_fix.setdefault(f.fix_key, []).append(f)
@@ -222,7 +251,8 @@ def device_page(request: Request, device_id: int, user: str = Depends(auth.curre
         events = s.execute(select(FindingEvent, Finding).join(Finding, Finding.id == FindingEvent.finding_id)
                            .where(FindingEvent.device_id == device_id).order_by(FindingEvent.at.desc(), FindingEvent.id.desc()).limit(40)).all()
         return render(request, "device.html", user, dev=dev, site=site, client=client, fixes=fixes, by_fix=by_fix, software=software,
-                      wua=wua, cross=_cross_check(dev, open_findings, wua), events=events)
+                      wua=wua, cross=_cross_check(dev, open_findings, wua), events=events, why=why, excs=excs,
+                      importance=scoring.importance(dev))
 
 
 def _cross_check(dev: Device, open_findings: list[Finding], wua: list[WuaUpdate]) -> dict | None:
@@ -241,6 +271,135 @@ def request_rescan(request: Request, device_id: int, user: str = Depends(auth.cu
         dev = s.get(Device, device_id) or _404()
         dev.rescan_requested = True
     return RedirectResponse(f"/devices/{device_id}", 303)
+
+
+@router.post("/devices/{device_id}/settings")
+def device_settings(request: Request, device_id: int, criticality: str = Form(""), internet_facing: bool = Form(False),
+                    user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    with session_scope() as s:
+        dev = s.get(Device, device_id) or _404()
+        dev.criticality = int(criticality) if criticality in {"1", "2", "3", "4", "5"} else None
+        dev.internet_facing = internet_facing
+        scoring.rescore(s, dev)
+    return RedirectResponse(f"/devices/{device_id}", 303)
+
+
+# --- exceptions ----------------------------------------------------------------------------
+
+CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
+
+
+@dataclass
+class Scope:
+    client: Client
+    device: Device | None
+    fix_key: str | None
+    fix_label: str | None
+    cve_id: str | None
+    matching: int
+
+
+def _scope(s: Session, client_id: int | None, device_id: int | None, fix_key: str | None, cve_id: str | None) -> Scope:
+    """What an exception would cover. Raises 404 or 400 for anything that does not add up."""
+    dev = None
+    if device_id is not None:
+        dev = s.get(Device, device_id) or _404()
+        owner = s.scalar(select(Site.client_id).where(Site.id == dev.site_id))
+        if client_id is not None and client_id != owner:
+            raise HTTPException(400, "that device belongs to another client")
+        client_id = owner
+    client = s.get(Client, client_id) if client_id is not None else None
+    if client is None:
+        _404()
+    fix_key = (fix_key or "").strip() or None
+    cve_id = (cve_id or "").strip().upper() or None
+    if not fix_key and not cve_id:
+        raise HTTPException(400, "an exception needs a fix, a CVE, or both")
+    if cve_id and not CVE_RE.match(cve_id):
+        raise HTTPException(400, "not a CVE id")
+    if fix_key and len(fix_key) > 220:
+        raise HTTPException(400, "fix key too long")
+    q = (select(func.count(Finding.id), func.max(Finding.fix_label)).join(Device, Device.id == Finding.device_id)
+         .join(Site, Site.id == Device.site_id).where(Site.client_id == client.id, Finding.status == "open"))
+    if dev:
+        q = q.where(Finding.device_id == dev.id)
+    if fix_key:
+        q = q.where(Finding.fix_key == fix_key)
+    if cve_id:
+        q = q.where(Finding.cve_id == cve_id)
+    n, label = s.execute(q).one()
+    return Scope(client, dev, fix_key, label if fix_key else None, cve_id, n)
+
+
+@router.get("/exceptions", response_class=HTMLResponse)
+def exceptions_page(request: Request, client: int | None = None, user: str = Depends(auth.current_user)):
+    with session_scope() as s:
+        today = utcnow().date()
+        q = (select(FindingException, Client, Device).join(Client, Client.id == FindingException.client_id)
+             .outerjoin(Device, Device.id == FindingException.device_id))
+        if client is not None:
+            q = q.where(FindingException.client_id == client)
+        rows = s.execute(q.order_by(FindingException.expires_on, FindingException.id.desc())).all()
+        held = dict(s.execute(select(Finding.exception_id, func.count()).where(Finding.status == "open", Finding.exception_id.is_not(None))
+                              .group_by(Finding.exception_id)).all())
+        active = [r for r in rows if scoring.is_active(r[0], today)]
+        ended = [r for r in rows if not scoring.is_active(r[0], today)]
+        ended.sort(key=lambda r: r[0].revoked_at or datetime.combine(r[0].expires_on, datetime.max.time()), reverse=True)
+        return render(request, "exceptions.html", user, active=active, ended=ended[:100], held=held, today=today,
+                      client=s.get(Client, client) if client is not None else None)
+
+
+@router.get("/exceptions/new", response_class=HTMLResponse)
+def exception_form(request: Request, client: int | None = None, device: int | None = None, fix: str | None = None, cve: str | None = None,
+                   error: str | None = None, user: str = Depends(auth.current_user)):
+    with session_scope() as s:
+        today = utcnow().date()
+        return render(request, "exception_new.html", user, scope=_scope(s, client, device, fix, cve), error=error,
+                      default_expiry=today + timedelta(days=90), max_expiry=today + timedelta(days=scoring.MAX_EXCEPTION_DAYS), today=today)
+
+
+@router.post("/exceptions")
+def create_exception(request: Request, reason: str = Form(""), note: str = Form("", max_length=2000), expires_on: str = Form(""),
+                     client: int | None = Form(None), device: int | None = Form(None), fix: str = Form(""), cve: str = Form(""),
+                     user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    today = utcnow().date()
+    try:
+        until = date.fromisoformat(expires_on)
+    except ValueError:
+        until = None
+    error = None
+    if reason not in scoring.REASONS:
+        error = "Pick a reason."
+    elif not note.strip():
+        error = "Add a note that explains the decision."
+    elif until is None or not today <= until <= today + timedelta(days=scoring.MAX_EXCEPTION_DAYS):
+        error = f"The end date must be between today and {scoring.MAX_EXCEPTION_DAYS} days from now."
+    with session_scope() as s:
+        sc = _scope(s, client, device, fix, cve)
+        if error:
+            params = {"client": sc.client.id, "device": sc.device.id if sc.device else None, "fix": sc.fix_key, "cve": sc.cve_id, "error": error}
+            return RedirectResponse("/exceptions/new?" + "&".join(f"{k}={quote(str(v), safe='')}" for k, v in params.items() if v is not None), 303)
+        s.add(FindingException(client_id=sc.client.id, device_id=sc.device.id if sc.device else None, fix_key=sc.fix_key, cve_id=sc.cve_id,
+                               reason=reason, note=note.strip(), expires_on=until, created_by=user[:200], created_at=utcnow()))
+        s.flush()
+        scoring.rescore_client(s, sc.client.id, sc.device.id if sc.device else None)
+        target = f"/devices/{sc.device.id}" if sc.device else f"/exceptions?client={sc.client.id}"
+    return RedirectResponse(target, 303)
+
+
+@router.post("/exceptions/{exc_id}/revoke")
+def revoke_exception(request: Request, exc_id: int, user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    with session_scope() as s:
+        exc = s.get(FindingException, exc_id) or _404()
+        if exc.revoked_at is None:
+            exc.revoked_at, exc.revoked_by = utcnow(), user[:200]
+            s.flush()
+            scoring.rescore_client(s, exc.client_id, exc.device_id)
+        client_id = exc.client_id
+    return RedirectResponse(f"/exceptions?client={client_id}", 303)
 
 
 @router.get("/software", response_class=HTMLResponse)

@@ -16,6 +16,7 @@
 {% elif key.startswith("kb:") and key[3:].isdigit() %}
 <p><a href="https://www.catalog.update.microsoft.com/Search.aspx?q=KB{{ key[3:] }}" rel="noopener noreferrer" target="_blank">KB{{ key[3:] }} in the Microsoft Update Catalog</a></p>
 {% endif %}
+{% if client %}<p><a href="/exceptions/new?client={{ client.id }}&amp;fix={{ quote(key) }}">Add an exception for this fix on every device at {{ client.name }}</a></p>{% endif %}
 
 <h2>Devices</h2>
 <div class="table-wrap"><table>

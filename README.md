@@ -7,10 +7,11 @@ FIRST EPSS, CISA vulnrichment, WinGet), matches it against what is installed on 
 endpoints, ranks findings by real-world exploitability and groups them by the fix that closes
 them.
 
-**Status: Phase 1.** A light Windows agent (0.9 MB, about 10 MB of memory, uploads only when
-something changes) reports to the server, which keeps findings with found and fixed history and
-shows them on a fix-grouped dashboard behind Cloudflare Access. Posture checks, sensor mode and
-PSA integration come next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+**Status: Phase 2 in progress.** A light Windows agent (0.9 MB, about 10 MB of memory, uploads
+only when something changes) reports to the server, which keeps findings with found and fixed
+history and shows them on a fix-grouped dashboard behind Cloudflare Access. Every finding has a
+risk score that shows how it was reached, a fix deadline, and can be covered by an exception
+with a reason and an end date. Posture checks, sensor mode and PSA integration come next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 [docs/scoring.md](docs/scoring.md) and [agent/README.md](agent/README.md).
 
 ## Run it locally
