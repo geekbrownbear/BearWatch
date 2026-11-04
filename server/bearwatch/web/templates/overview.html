@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block main %}
+<p class="eyebrow">All clients</p>
+<h1>Overview</h1>
+
+<div class="tiles">
+  <div class="tile"><div class="n">{{ totals.devices }}</div><div class="l">Devices</div></div>
+  <div class="tile {% if totals.silent %}alert{% endif %}"><div class="n">{{ totals.silent }}</div><div class="l">Silent agents (24 hours or more)</div></div>
+  <div class="tile"><div class="n">{{ totals.open }}</div><div class="l">Open findings</div></div>
+  <div class="tile {% if totals.exploited %}alert{% endif %}"><div class="n">{{ totals.exploited }}</div><div class="l">Known exploited</div></div>
+</div>
+
+<h2>Top fixes</h2>
+<p class="muted">Each row is one update. Install it and every CVE in the row closes on every device listed.</p>
+{{ m.fix_table(fixes) }}
+
+<h2>Clients</h2>
+{% if clients %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Client</th><th class="num">Devices</th><th class="num">Silent</th><th class="num">Open findings</th><th class="num">Known exploited</th><th>Most urgent fix</th></tr></thead>
+  <tbody>
+  {% for c in clients %}
+    <tr>
+      <td><a href="/clients/{{ c.client.id }}"><strong>{{ c.client.name }}</strong></a></td>
+      <td class="num">{{ c.devices }}</td>
+      <td class="num">{% if c.silent %}<span class="bad">{{ c.silent }}</span>{% else %}0{% endif %}</td>
+      <td class="num">{{ c.open }}</td>
+      <td class="num">{% if c.exploited %}<span class="t1">{{ c.exploited }}</span>{% else %}0{% endif %}</td>
+      <td>{% if c.top_fix %}<a href="/fix?key={{ quote(c.top_fix.fix_key) }}&amp;client={{ c.client.id }}">{{ c.top_fix.label }}</a> {{ m.tier(c.top_fix.tier) }}{% else %}<span class="muted">None</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="notice">No clients yet. <a href="/admin">Add a client and a site</a> to get an enrollment key for the agent.</div>
+{% endif %}
+
+<h2>Vulnerability data</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Source</th><th>Status</th><th>Last update</th><th class="num">Records</th></tr></thead>
+  <tbody>
+  {% for f in feeds %}
+    <tr>
+      <td><strong>{{ f.source | upper }}</strong></td>
+      <td>{% if f.last_status == "ok" %}<span class="dot ok">OK</span>{% elif f.last_status == "error" %}<span class="dot bad">Error</span> <span class="muted">{{ (f.last_error or "")[:120] }}</span>{% else %}<span class="dot warn">{{ f.last_status or "Pending" }}</span>{% endif %}</td>
+      <td>{{ ago(f.last_success) }}</td>
+      <td class="num">{{ "{:,}".format(f.rows or 0) }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="empty">The worker has not synced any data yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

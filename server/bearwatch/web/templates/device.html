@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ dev.hostname }} · BearWatch{% endblock %}
+{% block main %}
+<p class="eyebrow"><a href="/clients/{{ client.id }}">{{ client.name }}</a> · {{ site.name }}</p>
+<h1>{{ dev.hostname }}</h1>
+
+<div class="card meta">
+  <div><span class="k">Agent</span><strong>{{ m.status(dev) }}</strong> <span class="muted">{{ ago(dev.last_seen) }}</span></div>
+  <div><span class="k">Windows</span><strong>{{ dev.os_caption or "Waiting for inventory" }}</strong> <span class="mono muted">{{ dev.os_build or "" }}</span></div>
+  <div><span class="k">Last inventory</span><strong>{{ ago(dev.last_inventory_at) }}</strong></div>
+  <div><span class="k">Findings updated</span><strong>{{ ago(dev.last_match_at) }}</strong>{% if dev.needs_match %} <span class="muted">(queued)</span>{% endif %}</div>
+  <div><span class="k">Agent version</span><strong>{{ dev.agent_version or "-" }}</strong></div>
+  <div><span class="k">Enrolled</span><strong>{{ ago(dev.enrolled_at) }}</strong></div>
+</div>
+{% if dev.match_error %}<div class="notice error">{{ dev.match_error }}</div>{% endif %}
+{% if dev.reboot_pending %}<div class="notice"><strong>A restart is pending.</strong> Windows has installed an update that takes effect after the next restart. Until then the device runs build {{ dev.os_build }}, and the findings below reflect that build.</div>{% endif %}
+<form class="inline" method="post" action="/devices/{{ dev.id }}/rescan">
+  <button class="btn" type="submit">{% if dev.rescan_requested %}Rescan requested{% else %}Request a rescan{% endif %}</button>
+</form>
+<span class="muted">The agent picks this up at its next heartbeat (within 15 minutes).</span>
+
+<h2>Fixes for this device</h2>
+{% if fixes %}
+<div class="card">
+{% for f in fixes %}
+  <details{% if loop.first %} open{% endif %}>
+    <summary><span class="grow">{{ f.label }}</span>{{ m.tier(f.tier) }}<span class="muted">{{ f.cves }} CVE{{ "s" if f.cves != 1 }}</span></summary>
+    {{ m.cve_table(by_fix[f.fix_key][:50]) }}
+    {% if by_fix[f.fix_key] | length > 50 %}<p class="muted">Showing the 50 most urgent. <a href="/fix?key={{ quote(f.fix_key) }}&amp;client={{ client.id }}">See all {{ by_fix[f.fix_key] | length }} on the fix page</a>.</p>{% endif %}
+  </details>
+{% endfor %}
+</div>
+{% else %}
+<div class="table-wrap"><p class="empty">{% if dev.last_match_at %}No open findings.{% else %}Findings appear a minute after the first inventory.{% endif %}</p></div>
+{% endif %}
+
+<h2>Windows Update cross-check</h2>
+{% if cross is none %}
+<p class="muted">Not run on this device. Turn it on for the site under <a href="/admin">Clients and sites</a>. It runs weekly at most, only when the PC is idle and on AC power.</p>
+{% else %}
+<p>Checked {{ ago(dev.wua_checked_at) }}.
+  {% if dev.wua_error %}<span class="bad">Windows Update reported an error: {{ dev.wua_error }}</span>
+  {% elif cross.match %}<span class="ok">BearWatch and Windows Update agree.</span>
+  {% else %}<span class="warn">BearWatch and Windows Update disagree. Details below.</span>{% endif %}
+</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Security update</th><th>BearWatch</th><th>Windows Update</th></tr></thead>
+  <tbody>
+  {% for kb in cross.agree %}<tr><td class="mono">KB{{ kb }}</td><td>Missing</td><td>Missing</td></tr>{% endfor %}
+  {% for kb in cross.only_bearwatch %}<tr><td class="mono">KB{{ kb }}</td><td>Missing</td><td class="warn">Not offered</td></tr>{% endfor %}
+  {% for kb in cross.only_wua %}<tr><td class="mono">KB{{ kb }}</td><td class="warn">Not flagged</td><td>Missing</td></tr>{% endfor %}
+  {% if not (cross.agree or cross.only_bearwatch or cross.only_wua) %}<tr><td colspan="3" class="empty">Neither reports a missing security update.</td></tr>{% endif %}
+  </tbody>
+</table></div>
+{% if wua %}
+<details><summary><span class="grow">Everything Windows Update offered ({{ wua | length }})</span></summary>
+<div class="table-wrap"><table><tbody>
+{% for w in wua %}<tr><td>{{ w.title }}</td><td>{{ w.severity or "" }}</td></tr>{% endfor %}
+</tbody></table></div></details>
+{% endif %}
+{% endif %}
+
+<h2>Installed software ({{ software | length }})</h2>
+<details><summary><span class="grow">Show the list</span><span class="muted">{{ software | selectattr("resolved_by", "equalto", "override") | list | length }} mapped to NVD data</span></summary>
+<div class="table-wrap"><table>
+  <thead><tr><th>Program</th><th>Version</th><th>Publisher</th><th>Checked against</th></tr></thead>
+  <tbody>
+  {% for sw in software %}
+    <tr>
+      <td>{{ sw.name }}{% if sw.scope == "user" %} <span class="muted">(per user)</span>{% endif %}</td>
+      <td class="mono">{{ sw.version }}</td>
+      <td class="muted">{{ sw.publisher or "" }}</td>
+      <td>{% if sw.resolved_by == "override" %}<span class="mono">{{ sw.cpe | map("join", ":") | join(", ") }}</span>{% elif sw.resolved_by == "heuristic" %}<span class="warn">Suggested: {{ sw.cpe | map("join", ":") | join(", ") }}</span>{% else %}<span class="muted">Not mapped</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div></details>
+
+<h2>History</h2>
+{% if events %}
+<div class="table-wrap"><table>
+  <thead><tr><th>When</th><th>Event</th><th>CVE</th><th>Affects</th></tr></thead>
+  <tbody>
+  {% for e, f in events %}
+    <tr><td>{{ ago(e.at) }}</td><td class="{{ 'ok' if e.event == 'fixed' else 'warn' if e.event == 'reopened' else '' }}">{{ e.event | capitalize }}</td><td class="mono">{{ f.cve_id }}</td><td>{{ f.subject }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="table-wrap"><p class="empty">No events yet.</p></div>
+{% endif %}
+{% endblock %}

@@ -24,6 +24,10 @@ x-app: &app
     BEARWATCH_NVD_API_KEY: ${BEARWATCH_NVD_API_KEY:-}
     BEARWATCH_VULNCHECK_API_TOKEN: ${BEARWATCH_VULNCHECK_API_TOKEN:-}
     BEARWATCH_MSRC_MONTHS: ${BEARWATCH_MSRC_MONTHS:-36}
+    # Production: cloudflare (dashboard behind Cloudflare Access). Local: token.
+    BEARWATCH_DASHBOARD_AUTH: ${BEARWATCH_DASHBOARD_AUTH:-cloudflare}
+    BEARWATCH_CF_ACCESS_TEAM_DOMAIN: ${BEARWATCH_CF_ACCESS_TEAM_DOMAIN:-}
+    BEARWATCH_CF_ACCESS_AUD: ${BEARWATCH_CF_ACCESS_AUD:-}
   # Public resolvers: the feeds are all public, and internal split-horizon DNS adds nothing.
   dns:
     - 1.1.1.1
@@ -48,9 +52,18 @@ services:
   server:
     <<: *app
 
-  # Runs the feed syncs on their schedules (KEV 6h, NVD 2h, EPSS/MSRC/WinGet daily).
+  # Runs the feed syncs on their schedules (KEV 6h, NVD 2h, EPSS/MSRC/WinGet daily) and turns
+  # agent inventories into findings.
   worker:
     <<: *app
     command: ["python", "-m", "bearwatch.worker"]
     healthcheck:
       disable: true
+
+  # Not a running service: builds the Windows agent. Only starts with --profile tools.
+  # See agent/build.ps1.
+  agent-build:
+    profiles: ["tools"]
+    build:
+      context: ./agent
+    image: bearium/bw-agent-build:latest

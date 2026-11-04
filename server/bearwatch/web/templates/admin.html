@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Clients and sites · BearWatch{% endblock %}
+{% block main %}
+<p class="eyebrow">Setup</p>
+<h1>Clients and sites</h1>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+
+<div class="card">
+  <h3>Add a client</h3>
+  <form method="post" action="/admin/clients" class="form-row">
+    <label>Client name <input type="text" name="name" maxlength="200" required></label>
+    <button class="btn" type="submit">Add client</button>
+  </form>
+</div>
+
+{% if clients %}
+<div class="card">
+  <h3>Add a site</h3>
+  <p class="muted">Each site gets its own enrollment key. Agents use it once to register, then get their own device token.</p>
+  <form method="post" action="/admin/sites">
+    <div class="form-row">
+      <label>Client
+        <select name="client_id" required>{% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
+      </label>
+      <label>Site name <input type="text" name="name" maxlength="200" required></label>
+      <label class="check"><input type="checkbox" name="wua_check" value="true"> Weekly Windows Update cross-check</label>
+    </div>
+    <button class="btn" type="submit">Add site and show its key</button>
+  </form>
+</div>
+
+<h2>Sites</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Client</th><th>Site</th><th>Key starts with</th><th class="num">Devices</th><th>Windows Update cross-check</th><th></th></tr></thead>
+  <tbody>
+  {% for s in sites %}
+    <tr>
+      <td><a href="/clients/{{ s.client_id }}">{{ client_names[s.client_id] }}</a></td>
+      <td><strong>{{ s.name }}</strong></td>
+      <td class="mono">{{ s.enroll_key_hint }}...</td>
+      <td class="num">{{ counts.get(s.id, 0) }}</td>
+      <td>
+        <form class="inline" method="post" action="/admin/sites/{{ s.id }}/wua"><button class="link" type="submit">{{ "Weekly (turn off)" if s.wua_check else "Off (turn on)" }}</button></form>
+      </td>
+      <td><form class="inline" method="post" action="/admin/sites/{{ s.id }}/rotate"><button class="link" type="submit">New enrollment key</button></form></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="empty">No sites yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endblock %}

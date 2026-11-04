@@ -1,0 +1,28 @@
+{% import "_macros.html" as m %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}BearWatch{% endblock %}</title>
+  <link rel="icon" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/app.css?v={{ version }}">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/"><img src="/static/bear-white.png" alt="" width="28" height="32"><span>BearWatch</span></a>
+    {% if user %}
+    <nav>
+      <a href="/">Overview</a>
+      <a href="/software">Unmapped software</a>
+      <a href="/admin">Clients and sites</a>
+    </nav>
+    <div class="who">
+      <span>{{ user }}</span>
+      {% if user == "local admin" %}<form method="post" action="/logout"><button class="link">Sign out</button></form>{% endif %}
+    </div>
+    {% endif %}
+  </header>
+  <main>{% block main %}{% endblock %}</main>
+  <footer>BearWatch {{ version }} by Bearium Networks. This product uses the NVD API but is not endorsed or certified by the NVD. EPSS scores by FIRST. KEV data by CISA.</footer>
+</body>
+</html>

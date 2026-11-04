@@ -2,13 +2,16 @@
 
 Open-source endpoint and exposure vulnerability platform for MSPs, by Bearium Networks.
 
-BearWatch pulls free public vulnerability data (Microsoft MSRC, NVD, CISA KEV, FIRST EPSS, CISA
-vulnrichment, WinGet), matches it against what is installed on managed Windows endpoints, ranks
-findings by real-world exploitability and groups them by the fix that closes them.
+BearWatch pulls free public vulnerability data (Microsoft MSRC, NVD, CISA KEV, VulnCheck KEV,
+FIRST EPSS, CISA vulnrichment, WinGet), matches it against what is installed on managed Windows
+endpoints, ranks findings by real-world exploitability and groups them by the fix that closes
+them.
 
-**Status: Phase 0.** The intel store, sync worker and both matchers work. The Windows agent,
-dashboard and PSA integration come next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
-[docs/scoring.md](docs/scoring.md).
+**Status: Phase 1.** A light Windows agent (0.9 MB, about 10 MB of memory, uploads only when
+something changes) reports to the server, which keeps findings with found and fixed history and
+shows them on a fix-grouped dashboard behind Cloudflare Access. Posture checks, sensor mode and
+PSA integration come next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[docs/scoring.md](docs/scoring.md) and [agent/README.md](agent/README.md).
 
 ## Run it locally
 
@@ -20,11 +23,31 @@ docker compose up -d --build
 docker compose logs -f worker   # first full NVD sync: ~75 min (once; later runs take seconds)
 ```
 
-The API listens on `http://127.0.0.1:8080`. Check sync progress:
+The dashboard and API listen on `http://127.0.0.1:8080`; locally, sign in with
+`BEARWATCH_API_TOKEN`. Check sync progress:
 
 ```bash
 docker compose exec server bearwatch status
 ```
+
+## Enroll a PC
+
+Add a client and site on the dashboard (Clients and sites), or:
+
+```bash
+docker compose exec server bearwatch client add "Bearium Networks"
+docker compose exec server bearwatch site add --client "Bearium Networks" --name "Orlando office"
+```
+
+Build the agent with `powershell -File agent\build.ps1`, then on the PC, as administrator:
+
+```powershell
+dist\bw-agent.exe enroll --server http://127.0.0.1:8080 --key bwe_...
+dist\bw-agent.exe install
+```
+
+Findings appear on the dashboard about a minute after the first check-in. Production agents
+must use the `https://` address of the deployed server.
 
 ## Ask it questions
 
@@ -66,7 +89,15 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
 
 ## Deploy
 
-Production uses `compose.yaml` only: `docker compose -f compose.yaml up -d --build`.
+Production uses `compose.yaml` only: `docker compose -f compose.yaml up -d --build`. Database
+migrations run automatically at startup. Before the first deploy, set up Cloudflare Access for
+the dashboard and a Bypass rule for `/api/agent` (see
+[Dashboard sign-in](docs/ARCHITECTURE.md#dashboard-sign-in)) and put the team domain and AUD tag
+in `.env`.
+
+The dashboard ships with Bearium's logo and fonts (Inter and Mozilla Text, SIL Open Font
+License). The logo is Bearium Networks' trademark and is not covered by the GPL; other MSPs
+should replace `server/bearwatch/web/static/bear-white.png` and `favicon.png` with their own.
 
 ## Credits and terms
 

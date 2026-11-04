@@ -2,10 +2,13 @@
 
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import get_settings
@@ -28,12 +31,30 @@ def get_engine(url: str | None = None) -> Engine:
     return _engine
 
 
-def init_db(url: str | None = None) -> Engine:
-    """Create tables if missing. Alembic migrations replace this in Phase 1."""
-    from . import models  # noqa: F401  (registers tables)
+MIGRATIONS = Path(__file__).resolve().parent / "migrations"
+# Phase 0 databases were built with create_all, before Alembic. They match this revision.
+BASELINE = "0001"
+_LOCK_ID = 0x6265_6172  # "bear": serializes migrations when server and worker start together
 
+
+def _alembic_config(conn: Connection) -> Config:
+    cfg = Config()
+    cfg.set_main_option("script_location", str(MIGRATIONS))
+    cfg.attributes["connection"] = conn
+    return cfg
+
+
+def init_db(url: str | None = None) -> Engine:
+    """Bring the schema up to date with Alembic. Safe to call from every process at startup."""
     engine = get_engine(url)
-    models.Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _LOCK_ID})
+        tables = set(inspect(conn).get_table_names())
+        cfg = _alembic_config(conn)
+        if "alembic_version" not in tables and "cve" in tables:
+            command.stamp(cfg, BASELINE)
+        command.upgrade(cfg, "head")
     return engine
 
 

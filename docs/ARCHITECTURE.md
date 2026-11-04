@@ -9,26 +9,28 @@ Bearium Networks' own clients and released under GPL-3.0 so other MSPs can run i
 ```
 Windows endpoints                     Client site LAN                Internet
   bw-agent (Rust service)  ----+       bw-agent --sensor mode        Cyber Scan modules + PD tools
-   inventory + posture         |        (Proton engine)               scheduled per client
+   inventory, 0.9 MB exe       |        (Proton engine)               scheduled per client
                                v               |                              |
                      BearWatch server (Python/FastAPI, Postgres, Docker Compose)
                        |  tenants: client > site > device                    |
-                       |  intel store: MSRC, NVD, KEV, EPSS, vulnrichment,   |
-                       |    WinGet, exploit signals                          |
-                       |  matcher (2 paths) > scoring > findings             |
+                       |  intel store: MSRC, NVD, KEV x2, EPSS, vulnrichment,|
+                       |    WinGet                                           |
+                       |  matcher (2 paths) > findings (found/fixed events)  |
                        +--> fix-grouped dashboard, monthly PDF, HaloPSA <----+
 ```
 
-| Component | Status | Notes |
+| Component | Status | Where |
 |---|---|---|
-| Intel store + sync worker | **Phase 0, built** | `server/bearwatch/intel/` |
-| Windows OS matcher (MSRC) | **Phase 0, built** | `server/bearwatch/match/windows.py` |
-| App matcher (CPE) | **Phase 0, built** | `server/bearwatch/match/apps.py` + `intel/cpe_overrides.json` |
-| bw-agent (Rust) | Phase 1 | Inventory, enrollment, heartbeat. Shares a `proton-core` crate with Proton IP Scanner. |
-| Findings model | Phase 1 | Dedup, fixed events, exceptions, SLAs |
-| Sensor mode + unmanaged devices | Phase 2 | Proton scan engine on one agent per site |
-| External monitoring | Phase 3 | Shared package extracted from Bearium Cyber Scan |
-| HaloPSA + monthly PDF | Phase 3 | One ticket per fix per client |
+| Intel store + sync worker | Phase 0, built | `server/bearwatch/intel/` |
+| Windows OS matcher (MSRC) | Phase 0, built | `server/bearwatch/match/windows.py` |
+| App matcher (CPE) | Phase 0, built | `server/bearwatch/match/apps.py` + `intel/cpe_overrides.json` |
+| Tenants, enrollment, agent API | **Phase 1, built** | `server/bearwatch/tenants.py`, `agent_api.py`, `inventory.py` |
+| Findings with found/fixed/reopened events | **Phase 1, built** | `server/bearwatch/findings.py` |
+| Fix-grouped dashboard, Cloudflare Access sign-in | **Phase 1, built** | `server/bearwatch/web/`, `auth.py` |
+| bw-agent (Rust, Windows service) | **Phase 1, built** | `agent/` |
+| Schema migrations (Alembic) | **Phase 1, built** | `server/bearwatch/migrations/` |
+| Posture checks, sensor mode, exceptions, SLAs, risk score | Phase 2 | |
+| External monitoring, HaloPSA, monthly PDF | Phase 3 | |
 
 ## Two matching paths, never mixed
 
@@ -37,8 +39,8 @@ Windows endpoints                     Client site LAN                Internet
    KBs. A device is patched for a CVE when its build revision is at or past the fixed build, or
    when the KB (or any KB that supersedes it) is installed. NVD's Windows CPE data is not used.
 2. **Third-party apps** are matched from NVD CPE rules. The Windows program name is mapped to a
-   CPE vendor/product through `intel/cpe_overrides.json`. Unmapped programs are reported as
-   unresolved rather than guessed, and get added to the overrides file.
+   CPE vendor/product through `intel/cpe_overrides.json`. Unmapped programs are listed on the
+   dashboard's Unmapped software page rather than guessed, and get added to the overrides file.
 
 This split is what Fleet, Vuls and WES-NG converged on. NVD alone is also no longer enough:
 NIST now only fully enriches a subset of CVEs, so every source is merged server-side.
@@ -48,16 +50,87 @@ Details that matter for accuracy:
 - **Build families.** Windows versions shipped as enablement packages (22H2/23H2, 21H2/22H2 on
   Windows 10, 24H2/25H2) share cumulative updates, and MSRC sometimes lists the sibling's build
   as the fixed build. The matcher compares revisions across the family.
-- **Build beats KB.** When MSRC gives a comparable fixed build, the device's build decides.
-  The KB and supersedence path is only used when there is no comparable build.
-- **Fix grouping counts supersedence.** "Install KB X to close N" counts every open CVE that
-  update would close, not only the CVEs that list KB X directly.
+- **Build beats KB.** When MSRC gives a comparable fixed build, the device's running build
+  decides. This matters: an update waiting for a restart already shows in `Get-HotFix` (and in
+  most KB-list tools) as installed, but the PC is still running the old build and is still
+  exposed. BearWatch reports those CVEs as open. The agent also sends the KBs that servicing
+  lists as installed but waiting for a restart (CBS state 0x60), and only a fix in that list is
+  labeled "a restart is pending". Other open fixes on the same PC still say "Install".
+- **No OS data is not a fix.** When a build cannot be mapped to an MSRC product, or MSRC rows
+  for it are missing, OS matching is skipped and existing Windows findings stay open. The
+  device page shows why in its match error.
+- **Fix grouping counts supersedence.** "Install KB X" closes every open CVE that update would
+  close, not only the CVEs that list KB X directly.
 - **Platform-bound CPE rules.** NVD writes "Chrome on macOS" as Chrome AND macOS. Those
   platform requirements are stored per rule, and rules that need a non-Windows platform are
   skipped.
 - **Unbounded wildcards are ignored for apps.** A `*` rule with no version bounds (common on
-  old protocol CVEs like Logjam) would flag fully current software, so it is skipped unless a
-  caller asks for it.
+  old protocol CVEs like Logjam) would flag fully current software, so it is skipped.
+- **Only curated mappings produce findings.** The name-based fallback is shown as a suggestion
+  only. On the first real PC it proposed Mattermost's Google Drive plugin for Google Drive and a
+  Jenkins plugin for Microsoft Log Parser; counting those would put false CVEs in front of a
+  client.
+
+## The agent: light by design
+
+The agent collects; the server does every expensive step. Measured on a 438-program
+Windows 11 25H2 workstation:
+
+| | Target | Measured |
+|---|---|---|
+| Exe size | a few MB | 0.88 MB |
+| Inventory pass (registry read, hash) | under 1 s CPU | 57 ms wall, 78 ms CPU |
+| Peak memory | under 15 MB | 9.2 MB |
+| Upload | under 50 KB | 9 KB gzip (47 KB JSON), only when something changed |
+
+How it stays out of the way:
+
+- **No WMI, PowerShell, file system walk or driver.** Everything comes from the registry:
+  `Windows NT\CurrentVersion` (build and UBR), Component Based Servicing packages in state
+  Installed (KBs), and the Uninstall keys (64-bit, 32-bit, and each signed-in user's hive).
+- **Asleep almost all the time.** A heartbeat every 15 minutes carries the hash of the last
+  inventory. The registry is re-read every 4 hours, and the inventory is uploaded only when the
+  hash changed (or once a week as a refresh). Intervals come from the server, with 10% jitter.
+- **Background mode.** Collection runs with `THREAD_MODE_BACKGROUND_BEGIN`: lowest CPU, I/O
+  and memory priority.
+- **Windows Update cross-check is opt-in per site**, weekly at most, and only when the PC is on
+  AC power with system CPU under 20%. It is the one step that makes Windows work for a minute.
+- **Delayed auto-start service** running as LocalSystem, restarted by Windows after a crash.
+
+Known gaps: per-user installs of users who are signed out are not read (loading their registry
+hives would be intrusive), and .NET Framework updates are not matched yet (they are MSRC add-on
+products and need the KB list from WMI or servicing session data).
+
+## Agent protocol and security
+
+| Call | Auth | Purpose |
+|---|---|---|
+| `POST /api/agent/enroll` | site enrollment key | MachineGuid + hostname in, device token out. Same MachineGuid in the same site keeps the device and its history, and revokes the old token. |
+| `POST /api/agent/heartbeat` | device token | Returns whether to upload, collect now (rescan button), or run the Windows Update check. |
+| `POST /api/agent/inventory` | device token | Gzip JSON, 8 MB decompressed cap, schema-validated. Stored, then matched by the worker within 30 s. |
+
+- Enrollment keys and device tokens are 32 random bytes; the server stores only SHA-256.
+- The agent requires `https://` (plain http only for localhost) and uses Windows' own TLS stack
+  and certificate store.
+- Its config folder, `%ProgramData%\BearWatch`, is restricted to SYSTEM and Administrators.
+
+## Dashboard sign-in
+
+Production runs with `BEARWATCH_DASHBOARD_AUTH=cloudflare`. Set up on Cloudflare Zero Trust:
+
+1. An Access application for the BearWatch hostname, policy: Bearium staff (Microsoft 365).
+2. A second, more specific Access application for the same hostname with path `/api/agent`,
+   policy action **Bypass**, so agents at client sites can reach their three endpoints.
+3. Put the team domain and the first application's AUD tag in `.env`
+   (`BEARWATCH_CF_ACCESS_TEAM_DOMAIN`, `BEARWATCH_CF_ACCESS_AUD`).
+
+BearWatch verifies the Access JWT itself (signature, audience, issuer, expiry), so a request
+that reaches the container without passing through Access is still refused. Every form post must
+come from the dashboard's own origin. Pages send a strict Content-Security-Policy and run no
+JavaScript.
+
+Local development (`compose.override.yaml`) uses `token` mode: sign in with
+`BEARWATCH_API_TOKEN`.
 
 ## Data sources
 
@@ -66,20 +139,25 @@ Details that matter for accuracy:
 | MSRC CVRF API v3 | Windows CVE to KB, fixed build, supersedence | Daily, changed months only | Microsoft terms of use |
 | NVD CVE API 2.0 | CVE records, CVSS, app CPE rules | Every 2h, incremental | Public; "uses the NVD API but is not endorsed or certified by the NVD" |
 | CISA KEV | Known exploited | Every 6h | Public domain |
-| VulnCheck KEV | Broader known exploited list | Every 6h, if token set | Free community account; check terms |
+| VulnCheck KEV | Broader known exploited list (about 4,000 CVEs beyond CISA's) | Every 6h, if token set | Free community account; check terms |
 | FIRST EPSS | Exploit probability | Daily | Free; credit FIRST |
 | CISA vulnrichment | SSVC (exploitation, automatable, impact) | On demand per CVE | CC0 |
 | WinGet index | Latest version, fix command | Daily | MIT (winget-pkgs) |
 
+After any feed sync succeeds, every device is queued for re-evaluation, so a new KEV listing
+or CVE reaches findings without waiting for an agent.
+
 ## Repo layout
 
 ```
-compose.yaml            production services (postgres, server, worker)
-compose.override.yaml   local dev additions (ports on 127.0.0.1)
+compose.yaml            production services (postgres, server, worker) + agent-build tool
+compose.override.yaml   local dev additions (ports on 127.0.0.1, token sign-in)
 server/                 Python package `bearwatch` + tests + Dockerfile
+  bearwatch/migrations/ Alembic revisions, applied automatically at startup
+  bearwatch/web/        dashboard templates and static files
+agent/                  Rust agent, Dockerfile (cross-compile), build.ps1
 intel/                  curated data checked into git (cpe_overrides.json)
 docs/                   this file, scoring.md
-agent/                  (Phase 1) Rust workspace
 shared-scan/            (Phase 3) package extracted from Cyber Scan
 ```
 
@@ -90,14 +168,18 @@ final version to docker03 with `docker compose -f compose.yaml up -d` (no overri
 the Cloudflare Tunnel, the same way as Cyber Scan.
 
 The repo lives on the NAS, and Docker Desktop cannot bind-mount from a mapped network drive, so
-local dev has no source mounts: rebuild with `docker compose up -d --build server` after a change.
-Rebuilding the worker restarts any sync in progress.
+local dev has no source mounts: rebuild with `docker compose up -d --build server worker` after
+a change. Rebuilding the worker restarts any sync in progress.
 
-## Not done yet in Phase 0
+Schema changes are Alembic revisions in `server/bearwatch/migrations/versions`. Every process
+runs `upgrade head` at startup under a Postgres advisory lock. Databases created before Alembic
+(Phase 0) are stamped at revision 0001 automatically.
 
-- Schema is created with `create_all`, which never alters existing tables. Until Alembic
-  arrives with the Phase 1 tables, a schema change means dropping the affected tables.
-- SSVC is fetched on demand (`bearwatch ssvc CVE-...`); Phase 1 calls it for new findings.
-- VulnCheck KEV code is written but untested against the live API (needs a token).
+## Not done yet
+
+- .NET Framework and other MSRC add-on products (needs a fuller KB list).
+- Per-user installs of signed-out users.
+- SSVC is fetched on demand (`bearwatch ssvc CVE-...`), not yet for every new finding.
 - Exploit-module signals (Nuclei templates, Metasploit) are not ingested yet.
-- The refreshed offline database export for desktop Proton is not built yet.
+- Code signing and an MSI for the agent.
+- The refreshed offline database export for desktop Proton.

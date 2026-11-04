@@ -194,7 +194,8 @@ def match(session: Session, product: str, build: str, installed_kbs: list[str]) 
         # Installing a cumulative update moves the device to its build revision.
         same_family = g["fixed_build"] and _build_satisfies(build, g["fixed_build"]) is not None
         after = g["fixed_build"] if same_family else build
-        g["closes"] = sum(1 for cve in open_ids if _satisfied(open_ids[cve], after, kb_cover))
+        g["closed"] = sorted(cve for cve in open_ids if _satisfied(open_ids[cve], after, kb_cover))
+        g["closes"] = len(g["closed"])
     ordered = sorted(groups.values(), key=lambda g: (g["closes"], Version(g["fixed_build"] or "0")), reverse=True)
     result.by_fix = [{**g, "cves": sorted(g["cves"])} for g in ordered]
     return result
