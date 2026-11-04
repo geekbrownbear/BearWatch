@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     # Where the curated software-to-CPE overrides live.
     overrides_path: Path = Path(__file__).resolve().parents[2] / "intel" / "cpe_overrides.json"
 
+    # Agent schedule, sent to agents on every heartbeat so it can change without a redeploy.
+    heartbeat_seconds: int = 900  # 15 min: one small request
+    collect_seconds: int = 14400  # 4 h: read registry, upload only if the hash changed
+    inventory_refresh_days: int = 7  # force an upload this often even if nothing changed
+    wua_interval_days: int = 7  # Windows Update cross-check, on sites that enable it
+
+    # Dashboard sign-in. "cloudflare": trust only a valid Cloudflare Access JWT (production).
+    # "token": sign in with BEARWATCH_API_TOKEN (local development).
+    dashboard_auth: str = "token"
+    cf_access_team_domain: str = ""  # e.g. bearium.cloudflareaccess.com
+    cf_access_aud: str = ""  # the Access application's AUD tag
+
     # Contact string for the User-Agent we send to public feeds.
     user_agent: str = "BearWatch/0.1 (+https://github.com/geekbrownbear/BearWatch)"
 

@@ -1,13 +1,15 @@
-"""HTTP API. Phase 0 exposes intel status and the two matchers; agents and tenants come in Phase 1."""
+"""HTTP app: API-token endpoints (intel status, matchers), the agent API and the dashboard."""
 
 import hmac
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from . import __version__
+from . import __version__, agent_api, auth, web
 from .config import get_settings
 from .db import init_db, session_scope
 from .match import apps, windows
@@ -20,7 +22,30 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="BearWatch", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="BearWatch", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(agent_api.router)
+app.include_router(web.router)
+app.mount("/static", StaticFiles(directory=web.STATIC), name="static")
+
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "X-Frame-Options": "DENY",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
+    return response
+
+
+@app.exception_handler(auth.NotSignedIn)
+async def not_signed_in(_request: Request, _exc: auth.NotSignedIn):
+    return RedirectResponse("/login", 303)
 
 
 def require_token(authorization: str = Header(default="")) -> None:

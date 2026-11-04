@@ -1,0 +1,48 @@
+{% macro tier(t) -%}
+<span class="badge t{{ t }}">{{ tier_label[t] }}</span>
+{%- endmacro %}
+
+{% macro status(dev) -%}
+{% set h = health(dev) %}<span class="dot {{ h[0] }}">{{ h[1] }}</span>
+{%- endmacro %}
+
+{% macro fix_table(fixes, client_id=None, show_devices=True) -%}
+{% if fixes %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Fix</th><th>Urgency</th>{% if show_devices %}<th class="num">Devices</th>{% endif %}<th class="num">CVEs closed</th><th class="num">Known exploited</th><th class="num">Top EPSS</th><th class="num">Top CVSS</th></tr></thead>
+  <tbody>
+  {% for f in fixes %}
+    <tr>
+      <td><a href="/fix?key={{ quote(f.fix_key) }}{% if client_id %}&amp;client={{ client_id }}{% endif %}"><strong>{{ f.label }}</strong></a><br><span class="muted">{{ f.subject }}</span></td>
+      <td>{{ tier(f.tier) }}</td>
+      {% if show_devices %}<td class="num">{{ f.devices }}</td>{% endif %}
+      <td class="num">{{ f.cves }}</td>
+      <td class="num">{% if f.kev %}<span class="t1">{{ f.kev }}</span>{% else %}0{% endif %}</td>
+      <td class="num">{{ f.epss | pct }}</td>
+      <td class="num">{{ f.cvss | score }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="table-wrap"><p class="empty">No open findings.</p></div>
+{% endif %}
+{%- endmacro %}
+
+{% macro cve_table(findings, show_subject=False) -%}
+<div class="table-wrap"><table>
+  <thead><tr><th>CVE</th>{% if show_subject %}<th>Affects</th>{% endif %}<th>Urgency</th><th class="num">EPSS</th><th class="num">CVSS</th><th>First seen</th></tr></thead>
+  <tbody>
+  {% for f in findings %}
+    <tr>
+      <td><a class="mono" href="https://nvd.nist.gov/vuln/detail/{{ f.cve_id }}" rel="noopener noreferrer" target="_blank">{{ f.cve_id }}</a>{% if f.kev %} <span class="badge t1">KEV</span>{% endif %}</td>
+      {% if show_subject %}<td>{{ f.subject }} <span class="muted">{{ f.subject_version or "" }}</span></td>{% endif %}
+      <td>{{ tier(f.exploit_tier) }}</td>
+      <td class="num">{{ f.epss | pct }}</td>
+      <td class="num">{{ f.cvss | score }}</td>
+      <td>{{ ago(f.first_seen) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{%- endmacro %}

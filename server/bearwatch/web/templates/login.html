@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Sign in · BearWatch{% endblock %}
+{% block main %}
+<div class="login card">
+  <p class="eyebrow">Local development</p>
+  <h1>Sign in</h1>
+  <p class="muted">Use the BEARWATCH_API_TOKEN from your .env file. Production uses Cloudflare Access instead.</p>
+  {% if error %}<div class="notice error">That token did not match.</div>{% endif %}
+  <form method="post" action="/login">
+    <div class="form-row"><label>API token <input type="password" name="token" autocomplete="current-password" required></label></div>
+    <button class="btn" type="submit">Sign in</button>
+  </form>
+</div>
+{% endblock %}

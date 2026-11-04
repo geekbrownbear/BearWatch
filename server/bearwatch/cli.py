@@ -7,6 +7,10 @@
   bearwatch app --name "Google Chrome" --version 120.0.6099.71 [--publisher Google]
   bearwatch ssvc CVE-2024-3400 [...]
   bearwatch overrides check
+  bearwatch client list | add NAME
+  bearwatch site add --client NAME --name SITE [--wua]   (prints the enrollment key once)
+  bearwatch site rotate-key SITE_ID
+  bearwatch evaluate [--all]
 """
 
 import argparse
@@ -14,14 +18,15 @@ import json
 import logging
 import sys
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from . import findings, tenants
 from .db import init_db, session_scope
 from .intel import overrides, vulnrichment
 from .intel.common import run_sync
 from .jobs import JOBS
 from .match import apps, windows
-from .models import CpeMatch, SyncState
+from .models import Client, CpeMatch, Device, Site, SyncState
 
 
 def _ctx_line(c) -> str:
@@ -114,6 +119,55 @@ def cmd_overrides_check(_args) -> int:
     return 0
 
 
+def cmd_client(args) -> int:
+    with session_scope() as s:
+        if args.action == "add":
+            c = tenants.create_client(s, args.name)
+            print(f"client {c.id}: {c.name}")
+        else:
+            for c in s.scalars(select(Client).order_by(Client.name)):
+                sites = s.scalars(select(Site).where(Site.client_id == c.id).order_by(Site.name)).all()
+                print(f"{c.id:>4}  {c.name}")
+                for site in sites:
+                    n = s.scalar(select(func.count()).select_from(Device).where(Device.site_id == site.id))
+                    print(f"        site {site.id}: {site.name}  key {site.enroll_key_hint}...  devices {n}  wua_check {site.wua_check}")
+    return 0
+
+
+def cmd_site(args) -> int:
+    with session_scope() as s:
+        if args.action == "add":
+            client = s.scalar(select(Client).where(Client.name == args.client))
+            if client is None:
+                print(f"no client named {args.client!r}; add it with `bearwatch client add`", file=sys.stderr)
+                return 2
+            site, key = tenants.create_site(s, client, args.name, wua_check=args.wua)
+        else:
+            site = s.get(Site, args.site_id)
+            if site is None:
+                print(f"no site {args.site_id}", file=sys.stderr)
+                return 2
+            key = tenants.rotate_site_key(s, site)
+        print(f"site {site.id}: {site.name}")
+        print(f"enrollment key (shown once): {key}")
+    return 0
+
+
+def cmd_evaluate(args) -> int:
+    with session_scope() as s:
+        if args.all:
+            findings.mark_all_for_rematch(s)
+    total = 0
+    while True:
+        with session_scope() as s:
+            n = findings.evaluate_pending(s)
+        if not n:
+            break
+        total += n
+    print(f"evaluated {total} devices")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     ap = argparse.ArgumentParser(prog="bearwatch")
@@ -147,7 +201,25 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("overrides")
     p.add_argument("action", choices=["check"])
 
+    p = sub.add_parser("client", help="list or add clients")
+    p.add_argument("action", choices=["list", "add"])
+    p.add_argument("name", nargs="?")
+
+    p = sub.add_parser("site", help="add a site or rotate its enrollment key")
+    sp = p.add_subparsers(dest="action", required=True)
+    a = sp.add_parser("add")
+    a.add_argument("--client", required=True, help="client name")
+    a.add_argument("--name", required=True, help="site name")
+    a.add_argument("--wua", action="store_true", help="enable the weekly Windows Update cross-check")
+    a = sp.add_parser("rotate-key")
+    a.add_argument("site_id", type=int)
+
+    p = sub.add_parser("evaluate", help="recompute findings for devices that need it")
+    p.add_argument("--all", action="store_true", help="re-evaluate every device")
+
     args = ap.parse_args(argv)
+    if args.cmd == "client" and args.action == "add" and not args.name:
+        ap.error("client add needs a name")
     init_db()
     handlers = {
         "initdb": lambda a: 0,
@@ -157,6 +229,9 @@ def main(argv: list[str] | None = None) -> int:
         "app": cmd_app,
         "ssvc": cmd_ssvc,
         "overrides": cmd_overrides_check,
+        "client": cmd_client,
+        "site": cmd_site,
+        "evaluate": cmd_evaluate,
     }
     return handlers[args.cmd](args)
 

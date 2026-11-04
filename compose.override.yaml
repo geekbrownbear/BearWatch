@@ -11,3 +11,6 @@ services:
   server:
     ports:
       - "127.0.0.1:8080:8000"
+    environment:
+      # Sign in to the local dashboard with BEARWATCH_API_TOKEN instead of Cloudflare Access.
+      BEARWATCH_DASHBOARD_AUTH: token

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Enrollment key · BearWatch{% endblock %}
+{% block main %}
+<p class="eyebrow">{{ client.name }} · {{ site.name }}</p>
+<h1>{% if rotated %}New enrollment key{% else %}Site added{% endif %}</h1>
+<div class="notice">
+  <strong>Copy this key now.</strong> BearWatch stores only a hash of it, so it cannot be shown again. If it is lost, make a new one.
+  {% if rotated %}Devices that already enrolled keep working; the old key can no longer enroll new ones.{% endif %}
+  <code class="secret">{{ key }}</code>
+</div>
+<h2>Install the agent</h2>
+<p>Run these in an elevated prompt on each PC at this site, or push the same two commands from your RMM:</p>
+<pre class="cmd">bw-agent.exe enroll --server {{ server_url }} --key {{ key }}
+bw-agent.exe install</pre>
+<p><a href="/admin">Back to clients and sites</a></p>
+{% endblock %}

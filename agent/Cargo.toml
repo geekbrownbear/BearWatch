@@ -1,0 +1,42 @@
+[package]
+name = "bw-agent"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "BearWatch Windows agent: reads installed software and updates, reports to the BearWatch server"
+repository = "https://github.com/geekbrownbear/BearWatch"
+
+[[bin]]
+name = "bw-agent"
+path = "src/main.rs"
+
+# Kept deliberately small: no async runtime, no CLI framework, no regex. Every dependency
+# here ends up running on client PCs.
+[dependencies]
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+sha2 = "0.10.8"
+flate2 = "1.0.33"
+# Windows' own TLS (SChannel) and certificate store, so TLS-inspecting firewalls at client
+# sites work the same way they do for browsers, and no CA bundle ships in the binary.
+ureq = { version = "2.10.1", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2.12"
+winreg = "0.52.0"
+windows-service = "0.7.0"
+windows = { version = "0.58.0", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_UpdateAgent",
+    "Win32_System_Power",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -15,7 +15,15 @@ the client, then by impact, and always shows why a finding landed where it did.
 Within a tier, findings sort by EPSS, then CVSS. GitHub PoC repositories are a weak signal (many
 are fake or malware) and will never promote a finding above tier 3 on their own.
 
-## Risk score (Phase 1)
+## How the dashboard orders fixes (built in Phase 1)
+
+Findings are grouped by the fix that closes them (one KB or one app update). Fixes sort by the
+most urgent tier among their CVEs, then by how many devices need them, then by how many CVEs
+they close. Each row shows its known-exploited count, top EPSS and top CVSS.
+
+## Risk score (planned, Phase 2)
+
+Needs per-device asset criticality, which arrives with the Phase 2 device settings.
 
 ```
 risk = base(tier, cvss) x asset_criticality x exposure
