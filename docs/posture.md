@@ -34,9 +34,11 @@ someone who controlled the server could not use it to pull data off a PC.
   Anything else in a read list is skipped.
 - **Numbers and yes/no only.** A text value is sent only when it is a plain number (like
   AutoAdminLogon's "1"). Any other text or binary value is sent as `"set"`.
-- **No secrets.** A value whose name contains password, pwd, secret, passphrase, credential or
-  token is only ever sent as `"set"`. The autologon rule uses this to check that
-  `DefaultPassword` exists without reading it.
+- **No secrets.** A text value whose name contains password, pwd, secret, passphrase,
+  credential or token is only ever sent as `"set"`, even when it is all digits. The autologon
+  rule uses this to check that `DefaultPassword` exists without reading it. Number values
+  (DWORD and QWORD) are switches and are always sent, so `UseLogonCredential` and
+  `AdmPwdEnabled` still work.
 - **One Windows API, no WMI or PowerShell.** Antivirus health comes from Windows Security
   Center (`WscGetSecurityProviderHealth`), which also covers third-party antivirus.
 - At most 300 reads. The server checks the rules file against the same limits when it loads it,

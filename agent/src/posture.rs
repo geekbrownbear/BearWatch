@@ -4,8 +4,9 @@
 //! The server sends the list of values to read; the agent reads them, read-only, and only
 //! inside ALLOWED_KEYS, whatever the list asks for. It sends back numbers and yes/no, never
 //! text: a text value is sent as a number only when it is a plain number, and otherwise as
-//! "set". A value whose name could hold a secret is always sent as "set". So the list cannot be
-//! used to pull passwords or other data off the PC, even by someone who controls the server.
+//! "set". A text value whose name could hold a secret is always sent as "set". So the list
+//! cannot be used to pull passwords or other data off the PC, even by someone who controls the
+//! server.
 
 use std::collections::BTreeMap;
 
@@ -82,16 +83,17 @@ fn number_text(s: &str) -> Option<i64> {
     t.parse().ok()
 }
 
+/// DWORDs and QWORDs are on/off switches and levels, and are sent as numbers whatever their
+/// name (UseLogonCredential and AdmPwdEnabled are switches, not secrets). Text is where a
+/// password could sit, even an all-digit one, so a text value with a secret-looking name is
+/// only ever "set".
 fn convert(name: &str, raw: &RegValue) -> Value {
-    if secret(name) {
-        return SET;
-    }
     match raw.vtype {
         REG_DWORD if raw.bytes.len() == 4 => Value::Num(i64::from(u32::from_le_bytes(raw.bytes[..4].try_into().unwrap_or_default()))),
         REG_QWORD if raw.bytes.len() == 8 => {
             i64::try_from(u64::from_le_bytes(raw.bytes[..8].try_into().unwrap_or_default())).map_or(SET, Value::Num)
         }
-        REG_SZ | REG_EXPAND_SZ => String::from_reg_value(raw).ok().and_then(|s| number_text(&s)).map_or(SET, Value::Num),
+        REG_SZ | REG_EXPAND_SZ if !secret(name) => String::from_reg_value(raw).ok().and_then(|s| number_text(&s)).map_or(SET, Value::Num),
         _ => SET,
     }
 }
@@ -141,7 +143,31 @@ pub fn collect(hash: &str, reads: &[String]) -> Posture {
 
 #[cfg(test)]
 mod tests {
-    use super::{allowed, number_text, secret};
+    use super::{allowed, convert, number_text, secret, Value, SET};
+    use winreg::enums::{REG_BINARY, REG_DWORD, REG_SZ};
+    use winreg::RegValue;
+
+    fn text(s: &str) -> RegValue {
+        let bytes = s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        RegValue { bytes, vtype: REG_SZ }
+    }
+
+    fn dword(n: u32) -> RegValue {
+        RegValue { bytes: n.to_le_bytes().to_vec(), vtype: REG_DWORD }
+    }
+
+    #[test]
+    fn switches_keep_their_numbers_and_secrets_stay_hidden() {
+        // Switch names that merely contain "credential" or "pwd" (the WDigest and LAPS rules).
+        assert_eq!(convert("UseLogonCredential", &dword(1)), Value::Num(1));
+        assert_eq!(convert("AdmPwdEnabled", &dword(0)), Value::Num(0));
+        assert_eq!(convert("AutoAdminLogon", &text("1")), Value::Num(1));
+        // Text under a secret name is never sent, not even when it is all digits.
+        assert_eq!(convert("DefaultPassword", &text("123456")), SET);
+        assert_eq!(convert("DefaultPassword", &text("hunter2")), SET);
+        assert_eq!(convert("ProductName", &text("Windows 11 Pro")), SET);
+        assert_eq!(convert("Blob", &RegValue { bytes: vec![1, 2], vtype: REG_BINARY }), SET);
+    }
 
     #[test]
     fn allowlist() {
