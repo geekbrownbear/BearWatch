@@ -5,7 +5,9 @@ from bearwatch.api import app
 
 def test_health_and_auth(session):
     with TestClient(app) as c:
-        assert c.get("/api/health").json()["status"] == "ok"
+        r = c.get("/api/health")
+        assert r.json()["status"] == "ok"
+        assert "script-src 'none'" in r.headers["content-security-policy"] and r.headers["x-frame-options"] == "DENY"
         assert c.get("/api/intel/status").status_code == 401
         assert c.get("/api/intel/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
         r = c.get("/api/intel/status", headers={"Authorization": "Bearer test-token"})

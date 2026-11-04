@@ -18,6 +18,9 @@ use crate::{Result, VERSION};
 
 const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+/// HKCU\Software is shared between the 32-bit and 64-bit views, so KEY_WOW64_32KEY changes
+/// nothing there. Some 32-bit installers still write this literal path in the user hive.
+const UNINSTALL_USER_WOW: &str = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
 const CBS: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing";
 const CBS_INSTALLED: u32 = 0x70;
 const CBS_PERMANENT: u32 = 0x80;
@@ -191,6 +194,7 @@ pub fn software() -> Vec<Program> {
     for sid in users.enum_keys().flatten() {
         if sid.starts_with("S-1-5-21-") && !sid.ends_with("_Classes") {
             read_uninstall(&users, &format!(r"{sid}\{UNINSTALL}"), 0, "user", &mut out);
+            read_uninstall(&users, &format!(r"{sid}\{UNINSTALL_USER_WOW}"), 0, "user", &mut out);
         }
     }
     // The same program often appears in more than one view; keep one per name and version.

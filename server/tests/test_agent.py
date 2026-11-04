@@ -107,3 +107,19 @@ def test_inventory_rejects_bombs_and_junk(session):
         assert c.post("/api/agent/inventory", content=bomb, headers=h).status_code == 413
         bad = gzip.compress(json.dumps({"hash": "x"}).encode())
         assert c.post("/api/agent/inventory", content=bad, headers=h).status_code == 422
+
+
+def test_agent_api_checks_token_and_size_before_reading(session):
+    key = _seed()
+    big = b"x" * (3 * 1024 * 1024)
+    with TestClient(app) as c:
+        token = c.post("/api/agent/enroll", json={"enroll_key": key, "machine_guid": GUID, "hostname": "h", "agent_version": "0.1.0"}).json()["token"]
+        # A stranger is turned away on the token, whatever the body.
+        assert c.post("/api/agent/inventory", content=b"not gzip", headers={"Authorization": "Bearer bwd_nope", "Content-Encoding": "gzip"}).status_code == 401
+        # Over the wire cap: refused on Content-Length, and when chunked, as it streams.
+        h = {"Authorization": f"Bearer {token}", "Content-Encoding": "gzip"}
+        assert c.post("/api/agent/inventory", content=big, headers=h).status_code == 413
+        assert c.post("/api/agent/inventory", content=iter([big[:1_000_000]] * 3), headers=h).status_code == 413
+        # Enroll and heartbeat are tiny, so their cap is too.
+        assert c.post("/api/agent/heartbeat", content=b"{" + b" " * 20_000 + b"}", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}).status_code == 413
+        assert c.post("/api/agent/heartbeat", json={"agent_version": "0.1.0"}, headers={"Authorization": f"Bearer {token}"}).status_code == 200

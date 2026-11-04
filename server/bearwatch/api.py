@@ -35,12 +35,30 @@ SECURITY_HEADERS = {
 }
 
 
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    response = await call_next(request)
-    for k, v in SECURITY_HEADERS.items():
-        response.headers.setdefault(k, v)
-    return response
+class SecurityHeaders:
+    """Plain ASGI rather than @app.middleware("http"): that style reads the request in a
+    separate task, so errors raised while reading the body (BodyLimit) would escape."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def with_headers(msg):
+            if msg["type"] == "http.response.start":
+                present = {k.lower() for k, _ in msg.get("headers", [])}
+                extra = [(k.lower().encode(), v.encode()) for k, v in SECURITY_HEADERS.items() if k.lower().encode() not in present]
+                msg = {**msg, "headers": [*msg.get("headers", []), *extra]}
+            await send(msg)
+
+        await self.app(scope, receive, with_headers)
+
+
+app.add_middleware(SecurityHeaders)
+# Added last, so it is the outermost of our middleware and sees the body first.
+app.add_middleware(agent_api.BodyLimit)
 
 
 @app.exception_handler(auth.NotSignedIn)

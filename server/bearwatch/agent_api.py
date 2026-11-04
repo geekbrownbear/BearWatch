@@ -24,6 +24,42 @@ from .models import Device, Site
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 MAX_BODY = 8 * 1024 * 1024  # decompressed; a large PC inventory is well under 1 MB
+# On the wire, checked as the body arrives (see BodyLimit). The agent always gzips; a real
+# inventory is about 10 KB compressed, and enroll and heartbeat are a few hundred bytes.
+WIRE_LIMITS = (("/api/agent/inventory", 2 * 1024 * 1024), ("/api/agent/", 16 * 1024))
+
+
+class BodyLimit:
+    """ASGI middleware that caps request bodies on the agent API, which is reachable without
+    Cloudflare Access. A declared Content-Length over the cap is refused before any byte is
+    read; a chunked body is counted as it streams and refused the moment it passes the cap."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        limit = None
+        if scope["type"] == "http":
+            limit = next((n for prefix, n in WIRE_LIMITS if scope["path"].startswith(prefix)), None)
+        if limit is None:
+            return await self.app(scope, receive, send)
+        declared = dict(scope["headers"]).get(b"content-length")
+        if declared is not None and (not declared.isdigit() or int(declared) > limit):
+            await send({"type": "http.response.start", "status": 413, "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": b'{"detail":"request body too large"}'})
+            return
+        seen = 0
+
+        async def limited():
+            nonlocal seen
+            msg = await receive()
+            if msg["type"] == "http.request":
+                seen += len(msg.get("body", b""))
+                if seen > limit:
+                    raise HTTPException(413, "request body too large")
+            return msg
+
+        await self.app(scope, limited, send)
 
 
 class EnrollRequest(BaseModel):
@@ -77,6 +113,12 @@ def heartbeat(hb: Heartbeat, authorization: str = Header(default="")) -> dict:
 
 @router.post("/inventory", status_code=202)
 async def upload_inventory(request: Request, authorization: str = Header(default="")) -> dict:
+    # Check the token before reading the body, so a stranger costs one indexed lookup.
+    with session_scope() as s:
+        dev = tenants.device_for_token(s, _token(authorization))
+        if dev is None:
+            raise HTTPException(401, "unknown device token; re-enroll")
+        device_id = dev.id
     raw = await request.body()
     if request.headers.get("content-encoding", "").lower() == "gzip":
         try:
@@ -93,8 +135,8 @@ async def upload_inventory(request: Request, authorization: str = Header(default
     except ValidationError as e:
         raise HTTPException(422, e.errors(include_url=False, include_context=False)) from e
     with session_scope() as s:
-        dev = tenants.device_for_token(s, _token(authorization))
-        if dev is None:
+        dev = s.get(Device, device_id)
+        if dev is None:  # deleted while the body was in flight
             raise HTTPException(401, "unknown device token; re-enroll")
         inventory.store(s, dev, inv)
     return {"accepted": True}
