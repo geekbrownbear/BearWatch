@@ -91,6 +91,9 @@ class Rule:
     when: tuple[Condition, ...]
     match: str = "all"
     reference: str | None = None
+    # Only for Windows builds below this one, for settings whose default changed (TLS 1.0 and
+    # 1.1 are off by default from build 26100, Windows 11 24H2 and Server 2025).
+    before_build: int | None = None
 
     @property
     def reads(self) -> set[str]:
@@ -100,8 +103,16 @@ class Rule:
     def fix_key(self) -> str:
         return f"posture:{self.id}"
 
-    def applies_to(self, is_server: bool) -> bool:
+    def applies_to(self, is_server: bool, build: int | None = None) -> bool:
+        if self.before_build is not None and (build is None or build >= self.before_build):
+            return False
         return self.applies == "all" or self.applies == ("server" if is_server else "workstation")
+
+
+def build_number(os_build: str | None) -> int | None:
+    """26100 from "10.0.26100.6899"."""
+    parts = (os_build or "").split(".")
+    return int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else None
 
 
 @dataclass
@@ -161,9 +172,12 @@ def parse(text: str) -> Ruleset:
         when = tuple(_condition(rid, c) for c in r.get("when", []))
         if not when:
             raise RuleError(f"{rid}: needs at least one condition")
+        before = r.get("before_build")
+        if before is not None and (not isinstance(before, int) or isinstance(before, bool) or before <= 0):
+            raise RuleError(f"{rid}: before_build must be a Windows build number like 26100")
         rules.append(Rule(id=rid, title=r["title"].strip(), category=r["category"].strip(), severity=r["severity"],
                           applies=r.get("applies", "all"), fix=r["fix"].strip()[:400], why=r["why"].strip(), how=r["how"].strip(),
-                          when=when, match=r.get("match", "all"), reference=r.get("reference")))
+                          when=when, match=r.get("match", "all"), reference=r.get("reference"), before_build=before))
     rs = Ruleset(rules)
     if len(rs.reads) > MAX_READS:
         raise RuleError(f"{len(rs.reads)} reads; agents accept at most {MAX_READS}")
@@ -185,10 +199,12 @@ class Result:
     status: str  # fail | pass | unknown (the agent did not read every value this rule needs)
 
 
-def evaluate(rs: Ruleset, values: dict[str, Value], is_server: bool) -> list[Result]:
+def evaluate(rs: Ruleset, values: dict[str, Value], is_server: bool, build: int | None = None) -> list[Result]:
+    """`build`: the Windows build number (posture.build_number). Rules with before_build are
+    skipped when it is unknown."""
     out = []
     for r in rs.rules:
-        if not r.applies_to(is_server):
+        if not r.applies_to(is_server, build):
             continue
         if not r.reads <= values.keys():
             out.append(Result(r, "unknown"))

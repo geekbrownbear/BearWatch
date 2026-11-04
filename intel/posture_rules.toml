@@ -249,7 +249,7 @@ when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Services\Spooler:Start', op = "!
 
 [[rule]]
 id = "old-tls-server"
-title = "TLS 1.0 or 1.1 is turned on for incoming connections"
+title = "TLS 1.0 or 1.1 was turned on for incoming connections"
 category = "Network"
 severity = "medium"
 applies = "all"
@@ -263,4 +263,26 @@ match = "any"
 when = [
   { read = 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server:Enabled', op = "!=", value = 0 },
   { read = 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.1\Server:Enabled', op = "!=", value = 0 },
+]
+
+# The rule above catches TLS 1.0 and 1.1 turned on by hand. This one catches servers where they
+# are on by default: every Windows Server before 2025 (build 26100) accepts them unless they
+# are turned off. Workstations are left out; they rarely take incoming TLS connections.
+[[rule]]
+id = "old-tls-default"
+title = "TLS 1.0 or 1.1 is still on by default"
+category = "Network"
+severity = "medium"
+applies = "server"
+before_build = 26100
+fix = "Turn off TLS 1.0 and 1.1 on the server"
+why = """Windows Server versions before 2025 accept TLS 1.0 and 1.1 unless they are turned off. \
+Both are retired and have known weaknesses."""
+how = """Set Enabled to 0 under SCHANNEL\\Protocols\\TLS 1.0\\Server and TLS 1.1\\Server, then \
+restart. First check that no old app, scanner or device still needs them."""
+reference = "https://learn.microsoft.com/en-us/windows-server/security/tls/tls-registry-settings"
+match = "any"
+when = [
+  { read = 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server:Enabled', op = "missing" },
+  { read = 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.1\Server:Enabled', op = "missing" },
 ]

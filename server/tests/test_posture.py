@@ -65,6 +65,25 @@ def test_conditions():
     # applies = "server" rules are skipped on workstations, and the other way round.
     server_rule = posture.parse(_rule(f"{{ read = '{key}', op = 'exists' }}", 'applies = "server"'))
     assert posture.evaluate(server_rule, {key: True}, is_server=False) == []
+    # before_build: only older builds, and skipped when the build is unknown.
+    old_only = posture.parse(_rule(f"{{ read = '{key}', op = 'exists' }}", "before_build = 26100"))
+    assert [r.status for r in posture.evaluate(old_only, {key: True}, False, 20348)] == ["fail"]
+    assert posture.evaluate(old_only, {key: True}, False, 26100) == []
+    assert posture.evaluate(old_only, {key: True}, False, None) == []
+    assert posture.build_number("10.0.20348.2700") == 20348 and posture.build_number(None) is None
+
+
+def test_old_tls_on_by_default_only_on_older_servers():
+    """Server 2022 accepts TLS 1.0 and 1.1 unless turned off; Server 2025 does not."""
+    rs, values = posture.ruleset(), _values()
+    status = lambda server, build: {r.rule.id: r.status for r in posture.evaluate(rs, values, server, build)}  # noqa: E731
+    assert status(True, 20348)["old-tls-default"] == "fail"
+    assert "old-tls-default" not in status(True, 26100) and "old-tls-default" not in status(False, 19045)
+    off = {r: 0 for r in rs.reads if "SCHANNEL" in r}
+    assert {r.rule.id: r.status for r in posture.evaluate(rs, values | off, True, 20348)}["old-tls-default"] == "pass"
+    on = {r: 1 for r in rs.reads if "TLS 1.0" in r}  # turned on by hand: the other rule, not both
+    got = {r.rule.id: r.status for r in posture.evaluate(rs, values | off | on, True, 20348)}
+    assert got["old-tls-server"] == "fail" and got["old-tls-default"] == "pass"
 
 
 def _values(**overrides) -> dict:
@@ -146,3 +165,12 @@ def test_posture_end_to_end(session):
         # Junk values are refused: only numbers, true/false, "set" or null.
         bad = _inv("dddddddd", _values(**{LLMNR: "hunter2"}))
         assert _post_inv(c, token, bad).status_code == 422
+
+        # An older agent takes over: the stored values are dropped, not judged again, and the
+        # open finding stays open (no data is not a fix).
+        _post_inv(c, token, _inv("eeeeeeee", None) | {"agent_version": "0.1.1"})
+        with db.session_scope() as s:
+            assert s.get(Device, 1).posture is None
+            findings.evaluate(s, s.get(Device, 1))
+            assert set(_open(s)) == {"llmnr-on"}
+        assert "Settings checks need agent 0.2.0" in c.get("/devices/1").text

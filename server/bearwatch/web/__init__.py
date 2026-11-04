@@ -270,7 +270,7 @@ def _settings(dev: Device) -> list[posture.Result] | None:
     """Every posture rule for this device, failures first. None until the agent reports any."""
     if not dev.posture:
         return None
-    results = posture.evaluate(posture.ruleset(), dev.posture.get("values") or {}, dev.is_server)
+    results = posture.evaluate(posture.ruleset(), dev.posture.get("values") or {}, dev.is_server, posture.build_number(dev.os_build))
     status_order = {"fail": 0, "unknown": 1, "pass": 2}
     return sorted(results, key=lambda r: (status_order[r.status], SEVERITY_ORDER[r.rule.severity], r.rule.title))
 

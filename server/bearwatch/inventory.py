@@ -105,4 +105,8 @@ def store(s: Session, dev: Device, inv: Inventory) -> None:
         # The agent enforces the same allowlist; anything outside it is dropped, not stored.
         values = {k: v for k, v in inv.posture.values.items() if posture.read_allowed(k)}
         dev.posture, dev.posture_at = {"hash": inv.posture.hash, "values": values}, now
+    else:
+        # An older agent took over (downgrade or reinstall): don't keep judging stale values.
+        # Open posture findings stay open, since no data is not evidence of a fix.
+        dev.posture, dev.posture_at = None, None
     s.flush()

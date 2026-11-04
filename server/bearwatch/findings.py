@@ -99,7 +99,7 @@ def _posture_findings(dev: Device) -> tuple[dict[tuple[str, str, str], Current],
     if not dev.posture:
         return {}, None
     out, unknown = {}, set()
-    for r in posture.evaluate(posture.ruleset(), dev.posture.get("values") or {}, dev.is_server):
+    for r in posture.evaluate(posture.ruleset(), dev.posture.get("values") or {}, dev.is_server, posture.build_number(dev.os_build)):
         if r.status == "unknown":
             unknown.add(r.rule.id)
         elif r.status == "fail":

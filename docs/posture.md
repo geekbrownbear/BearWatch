@@ -55,6 +55,7 @@ why = "..."                       # shown on the fix page
 how = "..."
 reference = "https://..."         # optional
 match = "all"                     # optional: "any" fails when any one condition holds
+before_build = 26100              # optional: only Windows builds below this (for changed defaults)
 when = [
   { read = 'HKLM\SYSTEM\CurrentControlSet\Services\srv', op = "exists" },
   { read = 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters:SMB1', op = "!=", value = 0, default = 1 },
@@ -67,6 +68,9 @@ when = [
 - `default` is what Windows does when nothing is set. Without one, a missing value makes the
   condition false (except for `missing`).
 - Single quotes in TOML keep backslashes as they are.
+- When a Windows default changed between versions, split the rule: one for the setting turned
+  on by hand, and one with `before_build` for older builds where it is on by default. A rule
+  with `before_build` is skipped when the device's build is unknown.
 
 To add or change a rule:
 
@@ -96,7 +100,8 @@ Removing a rule closes its open findings at the next evaluation, recorded as fix
 | `llmnr-on` | Medium | All | LLMNR is not turned off by policy |
 | `uac-silent-elevation` | Medium | All | Admins elevate with no prompt |
 | `laps-missing` | Medium | All | Neither Windows LAPS nor legacy LAPS is set up |
-| `old-tls-server` | Medium | All | TLS 1.0 or 1.1 is turned on for incoming connections |
+| `old-tls-server` | Medium | All | TLS 1.0 or 1.1 was turned on by hand for incoming connections |
+| `old-tls-default` | Medium | Servers before 2025 | TLS 1.0 or 1.1 is not turned off, so it is on by default |
 | `remote-registry-auto` | Low | Workstations | Remote Registry starts automatically |
 | `spooler-on-server` | Low | Servers | Print Spooler is not disabled |
 
