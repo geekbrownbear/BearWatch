@@ -1,0 +1,56 @@
+# Production shape. Pinned project and volume names so a renamed checkout never starts on an
+# empty database. Local development layers compose.override.yaml on top automatically.
+#
+# On docker03 this sits behind the Cloudflare Tunnel like Cyber Scan. No ports are published
+# here; attach the network the tunnel uses (or add `ports:`) at deploy time.
+name: bearwatch
+
+volumes:
+  pgdata:
+    name: bearwatch_pgdata
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: server/Dockerfile
+  image: bearium/bearwatch:latest
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment:
+    BEARWATCH_DATABASE_URL: postgresql+psycopg://bearwatch:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/bearwatch
+    BEARWATCH_API_TOKEN: ${BEARWATCH_API_TOKEN:?set BEARWATCH_API_TOKEN}
+    BEARWATCH_NVD_API_KEY: ${BEARWATCH_NVD_API_KEY:-}
+    BEARWATCH_VULNCHECK_API_TOKEN: ${BEARWATCH_VULNCHECK_API_TOKEN:-}
+    BEARWATCH_MSRC_MONTHS: ${BEARWATCH_MSRC_MONTHS:-36}
+  # Public resolvers: the feeds are all public, and internal split-horizon DNS adds nothing.
+  dns:
+    - 1.1.1.1
+    - 8.8.8.8
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bearwatch
+      POSTGRES_USER: bearwatch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bearwatch -d bearwatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    <<: *app
+
+  # Runs the feed syncs on their schedules (KEV 6h, NVD 2h, EPSS/MSRC/WinGet daily).
+  worker:
+    <<: *app
+    command: ["python", "-m", "bearwatch.worker"]
+    healthcheck:
+      disable: true

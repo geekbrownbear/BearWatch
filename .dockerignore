@@ -1,0 +1,10 @@
+.git
+.env
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.pytest_cache
+**/*.db
+server/tests
+docs
+agent

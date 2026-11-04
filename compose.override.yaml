@@ -1,0 +1,13 @@
+# Local development only. `docker compose up` picks this up automatically; production deploys
+# use `docker compose -f compose.yaml up -d` so none of this applies.
+#
+# No source bind mounts: Docker Desktop cannot mount from a mapped network drive (the repo
+# lives on the NAS), so code changes are picked up with `docker compose up -d --build`.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5433:5432"
+
+  server:
+    ports:
+      - "127.0.0.1:8080:8000"
