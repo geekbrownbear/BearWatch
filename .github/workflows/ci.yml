@@ -1,0 +1,119 @@
+# Runs on every pull request and on pushes to main. Needs no secrets.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch or PR cancels the run still going for the old one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-tests:
+    name: Server tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/pyproject.toml
+      - name: Install
+        run: pip install -e "server[dev]"
+      - name: pytest
+        working-directory: server
+        run: python -m pytest -q
+
+  postgres-migrations:
+    name: Migrations on Postgres
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        # Same major version as compose.yaml.
+        image: postgres:17
+        env:
+          POSTGRES_USER: bearwatch
+          POSTGRES_PASSWORD: bearwatch
+          POSTGRES_DB: bearwatch
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bearwatch"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BEARWATCH_TEST_POSTGRES_URL: postgresql+psycopg://bearwatch:bearwatch@localhost:5432/bearwatch
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/pyproject.toml
+      - name: Install
+        run: pip install -e "server[dev]"
+      - name: Upgrade, downgrade and upgrade again
+        working-directory: server
+        run: python -m pytest -q tests/test_migrations.py -k postgres
+
+  server-image:
+    name: Server image builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -f server/Dockerfile -t bearwatch-server:ci .
+
+  agent:
+    name: Agent lint and build
+    # Cross-compiles for Windows from Linux, the same way agent/Dockerfile builds the
+    # shipped exe, so CI checks the binary we actually hand out.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: agent
+    env:
+      # Keep in step with the rust image in agent/Dockerfile.
+      RUST_VERSION: "1.88"
+      TARGET: x86_64-pc-windows-gnu
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy --target "$TARGET"
+          rustup override set "$RUST_VERSION"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent/target
+          key: agent-${{ runner.os }}-rust${{ env.RUST_VERSION }}-${{ hashFiles('agent/Cargo.lock') }}
+          restore-keys: agent-${{ runner.os }}-rust${{ env.RUST_VERSION }}-
+      - name: clippy
+        run: cargo clippy --locked --target "$TARGET" --all-targets -- -D warnings
+      - name: Release build
+        run: cargo build --locked --release --target "$TARGET"
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: bw-agent-${{ github.sha }}
+          path: agent/target/x86_64-pc-windows-gnu/release/bw-agent.exe
+          retention-days: 14
+          if-no-files-found: error
