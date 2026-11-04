@@ -1,0 +1,266 @@
+# BearWatch posture rules: Windows settings that make a device easier to attack.
+#
+# The server sends agents the list of values these rules read, and agents send the values
+# back with their inventory. A failed rule becomes a finding with its own fix, risk score and
+# deadline. Format, the agent's read allowlist and how to add a rule: docs/posture.md.
+#
+# Each rule fails when its `when` conditions hold (all of them, or any with match = "any").
+# A condition reads one value, or a list where the first one present wins (a Group Policy
+# value before the local setting). `default` is the Windows default when nothing is set.
+# Without a default, a missing value makes the condition false, unless op is "missing".
+#
+# Only values change what agents read. Editing titles and text needs no agent work at all.
+
+[[rule]]
+id = "av-unhealthy"
+title = "Antivirus is off, missing or out of date"
+category = "Malware protection"
+severity = "critical"
+applies = "workstation"
+fix = "Turn on antivirus and update it"
+why = """Windows Security Center reports that no antivirus is protecting this PC, or that it is \
+off or out of date. This covers Microsoft Defender and third-party products alike."""
+how = """Open Windows Security on the PC, or the antivirus console, and check that real-time \
+protection is on and its signatures are current. Third-party products must register with \
+Windows Security Center to count. Servers have no Security Center, so this rule skips them."""
+when = [{ read = "wsc:antivirus", op = "!=", value = 0 }]
+
+[[rule]]
+id = "firewall-off"
+title = "Windows Firewall is off for a network type"
+category = "Network"
+severity = "high"
+applies = "all"
+fix = "Turn on Windows Firewall"
+why = """With the firewall off, every listening service on the PC can be reached by anything \
+on the same network, including other infected PCs."""
+how = """Turn on Windows Firewall for the domain, private and public network types, by Group \
+Policy or Intune. If another firewall product replaces it, add an exception with the reason \
+"compensating control"."""
+match = "any"
+when = [
+  { read = ['HKLM\SOFTWARE\Policies\Microsoft\WindowsFirewall\DomainProfile:EnableFirewall', 'HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile:EnableFirewall'], op = "==", value = 0, default = 1 },
+  { read = ['HKLM\SOFTWARE\Policies\Microsoft\WindowsFirewall\StandardProfile:EnableFirewall', 'HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile:EnableFirewall'], op = "==", value = 0, default = 1 },
+  { read = ['HKLM\SOFTWARE\Policies\Microsoft\WindowsFirewall\PublicProfile:EnableFirewall', 'HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile:EnableFirewall'], op = "==", value = 0, default = 1 },
+]
+
+[[rule]]
+id = "smb1-server"
+title = "The SMBv1 file sharing server is on"
+category = "Network"
+severity = "critical"
+applies = "all"
+fix = "Turn off the SMBv1 server"
+why = """SMBv1 is the protocol that WannaCry and NotPetya used to spread from PC to PC. It has \
+no place on a modern network."""
+how = """Remove the "SMB 1.0/CIFS Server" Windows feature, or set SMB1 to 0 under \
+LanmanServer\\Parameters. First check that no old scanner or NAS still needs SMBv1."""
+reference = "https://learn.microsoft.com/en-us/windows-server/storage/file-server/troubleshoot/detect-enable-and-disable-smbv1-v2-v3"
+when = [
+  { read = 'HKLM\SYSTEM\CurrentControlSet\Services\srv', op = "exists" },
+  { read = 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters:SMB1', op = "!=", value = 0, default = 1 },
+]
+
+[[rule]]
+id = "smb1-client"
+title = "The SMBv1 file sharing client is on"
+category = "Network"
+severity = "high"
+applies = "all"
+fix = "Turn off the SMBv1 client"
+why = """The SMBv1 client lets the PC connect to old file shares with a protocol that has known, \
+widely used flaws."""
+how = """Remove the "SMB 1.0/CIFS Client" Windows feature. Check first that no old NAS or \
+copier share still needs it."""
+reference = "https://learn.microsoft.com/en-us/windows-server/storage/file-server/troubleshoot/detect-enable-and-disable-smbv1-v2-v3"
+when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Services\mrxsmb10:Start', op = "!=", value = 4 }]
+
+[[rule]]
+id = "smb-signing-server"
+title = "The server does not require SMB signing"
+category = "Network"
+severity = "medium"
+applies = "server"
+fix = "Require SMB signing on the server"
+why = """Without signing, an attacker on the network can relay a user's sign-in to this server \
+and act as that user."""
+how = """Turn on the Group Policy setting "Microsoft network server: Digitally sign \
+communications (always)"."""
+when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters:RequireSecuritySignature', op = "==", value = 0, default = 0 }]
+
+[[rule]]
+id = "llmnr-on"
+title = "LLMNR name lookups are on"
+category = "Network"
+severity = "medium"
+applies = "all"
+fix = "Turn off LLMNR"
+why = """When DNS fails, Windows asks the whole local network who has a name. Any device can \
+answer and collect the user's password hash. Attack tools do this out of the box."""
+how = """Turn on the Group Policy setting "Turn off multicast name resolution" under \
+Computer Configuration, Administrative Templates, Network, DNS Client."""
+reference = "https://attack.mitre.org/techniques/T1557/001/"
+when = [{ read = 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient:EnableMulticast', op = "!=", value = 0, default = 1 }]
+
+[[rule]]
+id = "wdigest-on"
+title = "Windows keeps sign-in passwords in memory in plain text"
+category = "Credentials"
+severity = "critical"
+applies = "all"
+fix = "Turn off WDigest password caching"
+why = """With WDigest caching on, anyone who gets admin rights on the PC can read the plain-text \
+password of every user who signed in. It is off by default, so someone turned it on."""
+how = """Set UseLogonCredential to 0 under Control\\SecurityProviders\\WDigest, then find out \
+who or what turned it on."""
+when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest:UseLogonCredential', op = "==", value = 1 }]
+
+[[rule]]
+id = "ntlmv1-allowed"
+title = "Old LM and NTLMv1 sign-ins are allowed"
+category = "Credentials"
+severity = "high"
+applies = "all"
+fix = "Allow only NTLMv2 sign-ins"
+why = """LM and NTLMv1 responses can be cracked in minutes, which turns a captured sign-in into \
+a password."""
+how = """Set the Group Policy "Network security: LAN Manager authentication level" to "Send \
+NTLMv2 response only. Refuse LM and NTLM"."""
+reference = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-lan-manager-authentication-level"
+when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa:LmCompatibilityLevel', op = "<", value = 3, default = 3 }]
+
+[[rule]]
+id = "lm-hash-stored"
+title = "Windows stores weak LM password hashes"
+category = "Credentials"
+severity = "high"
+applies = "all"
+fix = "Stop storing LM hashes"
+why = """LM hashes are trivial to crack. Windows stopped storing them by default years ago, so \
+this was changed on purpose."""
+how = """Turn on the Group Policy "Network security: Do not store LAN Manager hash value on next \
+password change", then have users change their passwords."""
+when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa:NoLMHash', op = "==", value = 0, default = 1 }]
+
+[[rule]]
+id = "rdp-without-nla"
+title = "Remote Desktop is on without Network Level Authentication"
+category = "Remote access"
+severity = "high"
+applies = "all"
+fix = "Require Network Level Authentication for Remote Desktop"
+why = """Without NLA, anyone who can reach the PC gets the Windows sign-in screen before proving \
+who they are. That exposes the PC to password guessing and to pre-sign-in flaws like BlueKeep."""
+how = """Turn on the Group Policy "Require user authentication for remote connections by using \
+Network Level Authentication", or turn Remote Desktop off if nobody uses it."""
+when = [
+  { read = ['HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services:fDenyTSConnections', 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server:fDenyTSConnections'], op = "==", value = 0, default = 1 },
+  { read = ['HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services:UserAuthentication', 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp:UserAuthentication'], op = "==", value = 0, default = 1 },
+]
+
+[[rule]]
+id = "uac-off"
+title = "User Account Control is off"
+category = "Accounts"
+severity = "high"
+applies = "all"
+fix = "Turn User Account Control back on"
+why = """With UAC off, every program an admin runs gets full control of the PC, including \
+anything in a malicious email attachment."""
+how = """Set EnableLUA to 1 (the Group Policy "User Account Control: Run all administrators in \
+Admin Approval Mode") and restart the PC."""
+reference = "https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/settings-and-configuration"
+when = [{ read = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System:EnableLUA', op = "==", value = 0, default = 1 }]
+
+[[rule]]
+id = "uac-silent-elevation"
+title = "Admins get full rights without a UAC prompt"
+category = "Accounts"
+severity = "medium"
+applies = "all"
+fix = "Make UAC prompt admins before elevating"
+why = """Programs started by an admin can take full control of the PC without the user ever \
+seeing a prompt."""
+how = """Set the Group Policy "User Account Control: Behavior of the elevation prompt for \
+administrators in Admin Approval Mode" to "Prompt for consent for non-Windows binaries" or \
+stricter."""
+reference = "https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/settings-and-configuration"
+when = [{ read = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System:ConsentPromptBehaviorAdmin', op = "==", value = 0, default = 5 }]
+
+[[rule]]
+id = "autologon-password"
+title = "Automatic sign-in stores a password in the registry"
+category = "Accounts"
+severity = "high"
+applies = "all"
+fix = "Remove the stored automatic sign-in password"
+why = """Automatic sign-in keeps the account's password in plain text in the registry, where \
+any admin or backup of the PC can read it."""
+how = """Turn off automatic sign-in and delete the DefaultPassword value under Winlogon. If a \
+kiosk needs it, use a limited local account and Autologon from Sysinternals, which encrypts the \
+password. BearWatch only checks that the value exists. It never reads it."""
+when = [
+  { read = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon:AutoAdminLogon', op = "==", value = 1 },
+  { read = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon:DefaultPassword', op = "exists" },
+]
+
+[[rule]]
+id = "laps-missing"
+title = "The local admin password is not managed by LAPS"
+category = "Accounts"
+severity = "medium"
+applies = "all"
+fix = "Manage the local admin password with Windows LAPS"
+why = """When every PC shares the same local admin password, one stolen PC gives an attacker \
+admin rights on all of them."""
+how = """Turn on Windows LAPS through Intune or Group Policy, backing passwords up to Entra ID or \
+Active Directory. Legacy Microsoft LAPS also counts."""
+reference = "https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-overview"
+when = [
+  { read = ['HKLM\SOFTWARE\Microsoft\Policies\LAPS:BackupDirectory', 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\LAPS:BackupDirectory'], op = "==", value = 0, default = 0 },
+  { read = 'HKLM\SOFTWARE\Policies\Microsoft Services\AdmPwd:AdmPwdEnabled', op = "!=", value = 1, default = 0 },
+]
+
+[[rule]]
+id = "remote-registry-auto"
+title = "The Remote Registry service starts automatically"
+category = "Remote access"
+severity = "low"
+applies = "workstation"
+fix = "Set Remote Registry to start manually or not at all"
+why = """Remote Registry lets other computers read and change this PC's settings over the \
+network. Workstations rarely need it running all the time."""
+how = """Set the Remote Registry service to Manual or Disabled, by Group Policy or in Services."""
+when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Services\RemoteRegistry:Start', op = "==", value = 2 }]
+
+[[rule]]
+id = "spooler-on-server"
+title = "Print Spooler runs on a server"
+category = "Attack surface"
+severity = "low"
+applies = "server"
+fix = "Turn off Print Spooler where the server doesn't print"
+why = """The Print Spooler has had a long run of serious flaws, PrintNightmare among them. On a \
+domain controller it also helps attackers take over the domain."""
+how = """Stop and disable the Print Spooler service on servers that are not print servers, and \
+always on domain controllers. For a print server, add an exception with the reason "risk \
+accepted"."""
+when = [{ read = 'HKLM\SYSTEM\CurrentControlSet\Services\Spooler:Start', op = "!=", value = 4 }]
+
+[[rule]]
+id = "old-tls-server"
+title = "TLS 1.0 or 1.1 is turned on for incoming connections"
+category = "Network"
+severity = "medium"
+applies = "all"
+fix = "Turn off TLS 1.0 and 1.1"
+why = """TLS 1.0 and 1.1 are retired and have known weaknesses. Someone turned them on here on \
+purpose, often for an old app."""
+how = """Set Enabled to 0 under SCHANNEL\\Protocols\\TLS 1.0\\Server and TLS 1.1\\Server, after \
+checking which app needed them."""
+reference = "https://learn.microsoft.com/en-us/windows-server/security/tls/tls-registry-settings"
+match = "any"
+when = [
+  { read = 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server:Enabled', op = "!=", value = 0 },
+  { read = 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.1\Server:Enabled', op = "!=", value = 0 },
+]

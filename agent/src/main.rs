@@ -6,13 +6,14 @@
 //!   bw-agent enroll --server https://bearwatch.example.com --key bwe_...
 //!   bw-agent install | uninstall        register or remove the Windows service
 //!   bw-agent run-once [--wua] [--force] one check-in now (for testing or an RMM script)
-//!   bw-agent inventory                   print what would be sent, plus resource use; no network
+//!   bw-agent inventory [--reads FILE]    print what would be sent, plus resource use; no network
 //!   bw-agent service                     entry point used by the Service Control Manager
 
 mod client;
 mod config;
 mod inventory;
 mod logger;
+mod posture;
 mod run;
 mod service;
 mod system;
@@ -32,7 +33,10 @@ usage:
   bw-agent install            install and start the Windows service (run as administrator)
   bw-agent uninstall          stop and remove the service and its stored token
   bw-agent run-once [--wua] [--force] [--config PATH]
-  bw-agent inventory          print the inventory as JSON with timing; sends nothing
+  bw-agent inventory [--reads FILE] [--config PATH]
+                              print the inventory as JSON with timing; sends nothing. Settings
+                              come from the read list the server last sent, or from FILE (a
+                              JSON list of reads, for testing posture rules)
   bw-agent version";
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -52,7 +56,7 @@ fn main() -> ExitCode {
         "install" => service::install(),
         "uninstall" => service::uninstall(),
         "run-once" => run::once(&config::path(config_path.as_deref()), has(&args, "--wua"), has(&args, "--force")),
-        "inventory" => cmd_inventory(),
+        "inventory" => cmd_inventory(&args, config_path),
         "service" => service::dispatch(),
         "wua-scan" => cmd_wua_scan(),
         "version" | "--version" => {
@@ -80,7 +84,7 @@ fn cmd_enroll(args: &[String], config_path: Option<PathBuf>) -> Result<()> {
     let api = client::Api::new(&server)?;
     let os = inventory::identity()?;
     let resp = api.enroll(key.trim(), &os.machine_guid, &os.hostname)?;
-    let cfg = config::Config { server: api.base().to_string(), device_id: resp.device_id, token: resp.token, last_upload_hash: None, wua: None };
+    let cfg = config::Config { server: api.base().to_string(), device_id: resp.device_id, token: resp.token, ..Default::default() };
     config::save(&path, &cfg)?;
     println!("enrolled {} as device {} with {}", os.hostname, cfg.device_id, cfg.server);
     println!("config: {}", path.display());
@@ -94,18 +98,24 @@ fn cmd_wua_scan() -> Result<()> {
     Ok(())
 }
 
-fn cmd_inventory() -> Result<()> {
+fn cmd_inventory(args: &[String], config_path: Option<PathBuf>) -> Result<()> {
+    let reads: Option<(String, Vec<String>)> = match flag(args, "--reads") {
+        Some(file) => Some(("local-file".into(),serde_json::from_slice(&std::fs::read(&file).map_err(|e| format!("cannot read {file}: {e}"))?)?)),
+        // The saved list, when this account can read the config (it is locked to administrators).
+        None => config::load(&config::path(config_path.as_deref())).ok().and_then(|c| c.posture_hash.map(|h| (h, c.posture_reads))),
+    };
     let t = Instant::now();
-    let inv = system::background(|| inventory::collect(None))?;
+    let inv = system::background(|| inventory::collect(None, reads.as_ref().map(|(h, r)| (h.as_str(), r.as_slice()))))?;
     let wall = t.elapsed();
     let json = serde_json::to_vec(&inv)?;
     let gz = client::gzip(&json)?;
     println!("{}", serde_json::to_string_pretty(&inv)?);
     let (cpu_ms, peak) = system::self_usage();
     eprintln!(
-        "programs {}  kbs {}  wall {} ms  cpu {} ms  peak memory {:.1} MB  upload {} bytes json / {} bytes gzip",
+        "programs {}  kbs {}  settings {}  wall {} ms  cpu {} ms  peak memory {:.1} MB  upload {} bytes json / {} bytes gzip",
         inv.software.len(),
         inv.kbs.len(),
+        inv.posture.as_ref().map_or(0, |p| p.values.len()),
         wall.as_millis(),
         cpu_ms,
         peak as f64 / 1_048_576.0,

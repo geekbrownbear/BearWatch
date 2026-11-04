@@ -2,7 +2,8 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    BEARWATCH_OVERRIDES_PATH=/srv/intel/cpe_overrides.json
+    BEARWATCH_OVERRIDES_PATH=/srv/intel/cpe_overrides.json \
+    BEARWATCH_POSTURE_RULES_PATH=/srv/intel/posture_rules.toml
 
 WORKDIR /srv/server
 

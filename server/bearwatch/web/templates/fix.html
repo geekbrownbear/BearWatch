@@ -1,15 +1,26 @@
 {% extends "base.html" %}
-{% block title %}{{ label or key }} · BearWatch{% endblock %}
+{% block title %}{{ label or (rule.fix if rule else key) }} · BearWatch{% endblock %}
 {% block main %}
-<p class="eyebrow">Fix{% if client %} for {{ client.name }}{% endif %}</p>
-<h1>{{ label or key }}</h1>
+<p class="eyebrow">{% if rule %}Windows setting{% else %}Fix{% endif %}{% if client %} for {{ client.name }}{% endif %}</p>
+<h1>{{ label or (rule.fix if rule else key) }}</h1>
+{% if rule %}
+<div class="card">
+  <p><strong>{{ rule.title }}.</strong> {{ m.severity(rule.severity) }} <span class="muted">{{ rule.category }}</span></p>
+  <p>{{ rule.why }}</p>
+  <h3>How to fix it</h3>
+  <p>{{ rule.how }}</p>
+  {% if rule.reference %}<p><a href="{{ rule.reference }}" rel="noopener noreferrer" target="_blank">Reference</a></p>{% endif %}
+</div>
+{% endif %}
 {% if not devices %}
 <div class="notice">Nothing open for this fix. Every device that needed it has it now.</div>
 {% else %}
 <div class="tiles">
   <div class="tile"><div class="n">{{ devices | length }}</div><div class="l">Devices need it</div></div>
+  {% if not rule %}
   <div class="tile"><div class="n">{{ cves | length }}</div><div class="l">CVEs it closes</div></div>
   <div class="tile {% if cves | selectattr('kev') | list %}alert{% endif %}"><div class="n">{{ cves | selectattr('kev') | list | length }}</div><div class="l">Known exploited</div></div>
+  {% endif %}
 </div>
 {% if key.startswith("winget:") %}
 <p>WinGet command: <code>winget upgrade --id {{ key[7:] }} -e</code></p>
@@ -20,15 +31,17 @@
 
 <h2>Devices</h2>
 <div class="table-wrap"><table>
-  <thead><tr><th>Device</th><th>Installed</th><th>Agent</th><th class="num">CVEs</th></tr></thead>
+  <thead><tr><th>Device</th>{% if not rule %}<th>Installed</th>{% endif %}<th>Agent</th>{% if not rule %}<th class="num">CVEs</th>{% endif %}</tr></thead>
   <tbody>
   {% for d in devices %}
-    <tr><td><a href="/devices/{{ d.device.id }}"><strong>{{ d.device.hostname }}</strong></a></td><td class="mono">{{ d.version or "" }}</td><td>{{ m.status(d.device) }}</td><td class="num">{{ d.cves }}</td></tr>
+    <tr><td><a href="/devices/{{ d.device.id }}"><strong>{{ d.device.hostname }}</strong></a></td>{% if not rule %}<td class="mono">{{ d.version or "" }}</td>{% endif %}<td>{{ m.status(d.device) }}</td>{% if not rule %}<td class="num">{{ d.cves }}</td>{% endif %}</tr>
   {% endfor %}
   </tbody>
 </table></div>
 
+{% if not rule %}
 <h2>CVEs</h2>
 {{ m.cve_table(cves, show_subject=True) }}
+{% endif %}
 {% endif %}
 {% endblock %}

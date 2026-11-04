@@ -6,11 +6,13 @@ software, KB and Windows Update lists and queues the device for matching in the 
 """
 
 from datetime import datetime
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
+from . import posture
 from .intel.common import utcnow
 from .match import windows
 from .models import Device, DeviceKb, DeviceSoftware, WuaUpdate
@@ -48,6 +50,14 @@ class WuaResult(BaseModel):
     missing: list[WuaEntry] = Field(default=[], max_length=500)
 
 
+class PostureReport(BaseModel):
+    """The values the agent read for the posture rules with this hash (see posture.py)."""
+
+    hash: str = Field(min_length=8, max_length=64)
+    values: dict[Annotated[str, StringConstraints(max_length=posture.MAX_READ_LEN)], int | bool | Literal["set"] | None] = Field(
+        default={}, max_length=posture.MAX_READS)
+
+
 class Inventory(BaseModel):
     hash: str = Field(min_length=8, max_length=64)
     agent_version: str = Field(max_length=32)
@@ -57,6 +67,7 @@ class Inventory(BaseModel):
     pending_kbs: list[str] = Field(default=[], max_length=200)
     software: list[Program] = Field(default=[], max_length=5000)
     wua: WuaResult | None = None
+    posture: PostureReport | None = None  # agents before 0.2.0 send none
 
 
 def store(s: Session, dev: Device, inv: Inventory) -> None:
@@ -89,4 +100,9 @@ def store(s: Session, dev: Device, inv: Inventory) -> None:
         for w in inv.wua.missing:
             kb = (w.kb or "").upper().removeprefix("KB") or None
             s.add(WuaUpdate(device_id=dev.id, kb=kb, title=w.title, severity=w.severity, is_security=w.is_security, cves=[c.upper() for c in w.cves][:500]))
+
+    if inv.posture is not None:
+        # The agent enforces the same allowlist; anything outside it is dropped, not stored.
+        values = {k: v for k, v in inv.posture.values.items() if posture.read_allowed(k)}
+        dev.posture, dev.posture_at = {"hash": inv.posture.hash, "values": values}, now
     s.flush()

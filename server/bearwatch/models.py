@@ -229,6 +229,10 @@ class Device(Base):
     # Set by a technician. None means the default (4 for servers, 3 otherwise); see scoring.py.
     criticality: Mapped[int | None] = mapped_column(Integer)
     internet_facing: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Settings values read for the posture rules: {"hash": rules hash, "values": {read: value}}.
+    # None until an agent that supports posture (0.2.0+) reports.
+    posture: Mapped[dict | None] = mapped_column(JSON)
+    posture_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     __table_args__ = (UniqueConstraint("site_id", "machine_guid"),)
 
@@ -278,7 +282,9 @@ class Finding(Base):
     __tablename__ = "finding"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     device_id: Mapped[int] = mapped_column(ForeignKey("device.id", ondelete="CASCADE"), index=True)
-    source: Mapped[str] = mapped_column(String(8))  # os | app
+    # os | app | posture. A posture finding is one failed rule: subject_key and cve_id hold the
+    # rule id, and fix_key is "posture:<rule id>".
+    source: Mapped[str] = mapped_column(String(8))
     subject_key: Mapped[str] = mapped_column(String(200))
     subject: Mapped[str] = mapped_column(String(400))
     subject_version: Mapped[str | None] = mapped_column(String(200))

@@ -24,6 +24,8 @@ class Settings(BaseSettings):
 
     # Where the curated software-to-CPE overrides live.
     overrides_path: Path = Path(__file__).resolve().parents[2] / "intel" / "cpe_overrides.json"
+    # Windows settings checks sent to agents (docs/posture.md).
+    posture_rules_path: Path = Path(__file__).resolve().parents[2] / "intel" / "posture_rules.toml"
 
     # Agent schedule, sent to agents on every heartbeat so it can change without a redeploy.
     heartbeat_seconds: int = 900  # 15 min: one small request

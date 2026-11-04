@@ -15,8 +15,8 @@ Windows endpoints                     Client site LAN                Internet
                        |  tenants: client > site > device                    |
                        |  intel store: MSRC, NVD, KEV x2, EPSS, vulnrichment,|
                        |    WinGet                                           |
-                       |  matcher (2 paths) > findings > risk, deadlines,    |
-                       |    exceptions                                       |
+                       |  matcher (2 paths) + posture rules > findings >     |
+                       |    risk, deadlines, exceptions                      |
                        +--> fix-grouped dashboard, monthly PDF, HaloPSA <----+
 ```
 
@@ -31,7 +31,8 @@ Windows endpoints                     Client site LAN                Internet
 | bw-agent (Rust, Windows service) | **Phase 1, built** | `agent/` |
 | Schema migrations (Alembic) | **Phase 1, built** | `server/bearwatch/migrations/` |
 | Risk score, fix deadlines, exceptions | **Phase 2, built** | `server/bearwatch/scoring.py`, [scoring.md](scoring.md) |
-| Posture checks, sensor mode, unmanaged devices | Phase 2 | |
+| Posture checks (Windows settings) | **Phase 2, built** | `server/bearwatch/posture.py`, `intel/posture_rules.toml`, `agent/src/posture.rs`, [posture.md](posture.md) |
+| Sensor mode, unmanaged devices | Phase 2 | |
 | External monitoring, HaloPSA, monthly PDF | Phase 3 | |
 
 ## Two matching paths, never mixed
@@ -90,6 +91,9 @@ How it stays out of the way:
 - **No WMI, PowerShell, file system walk or driver.** Everything comes from the registry:
   `Windows NT\CurrentVersion` (build and UBR), Component Based Servicing packages in state
   Installed (KBs), and the Uninstall keys (64-bit, 32-bit, and each signed-in user's hive).
+  Posture checks add about 30 settings values from policy and security keys, plus antivirus
+  health from one Windows Security Center call. The server picks which values; the agent
+  limits what it will read and sends numbers only (see [posture.md](posture.md)).
 - **Asleep almost all the time.** A heartbeat every 15 minutes carries the hash of the last
   inventory. The registry is re-read every 4 hours, and the inventory is uploaded only when the
   hash changed (or once a week as a refresh). Intervals come from the server, with 10% jitter.
@@ -110,6 +114,7 @@ products and need the KB list from WMI or servicing session data).
 | `POST /api/agent/enroll` | site enrollment key | MachineGuid + hostname in, device token out. Same MachineGuid in the same site keeps the device and its history, and revokes the old token. |
 | `POST /api/agent/heartbeat` | device token | Returns whether to upload, collect now (rescan button), or run the Windows Update check. |
 | `POST /api/agent/inventory` | device token | Gzip JSON, 8 MB decompressed cap, schema-validated. Stored, then matched by the worker within 30 s. |
+| `POST /api/agent/posture` | device token | The settings values the posture rules read. Fetched only when the heartbeat's posture hash changes. |
 
 - Enrollment keys and device tokens are 32 random bytes; the server stores only SHA-256.
 - The agent requires `https://` (plain http only for localhost) and uses Windows' own TLS stack
@@ -158,8 +163,8 @@ server/                 Python package `bearwatch` + tests + Dockerfile
   bearwatch/migrations/ Alembic revisions, applied automatically at startup
   bearwatch/web/        dashboard templates and static files
 agent/                  Rust agent, Dockerfile (cross-compile), build.ps1
-intel/                  curated data checked into git (cpe_overrides.json)
-docs/                   this file, scoring.md
+intel/                  curated data checked into git (cpe_overrides.json, posture_rules.toml)
+docs/                   this file, scoring.md, posture.md
 shared-scan/            (Phase 3) package extracted from Cyber Scan
 ```
 

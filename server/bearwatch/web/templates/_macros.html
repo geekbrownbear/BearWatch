@@ -2,6 +2,15 @@
 <span class="badge t{{ t }}">{{ tier_label[t] }}</span>
 {%- endmacro %}
 
+{% macro severity(s) -%}
+<span class="badge {{ severity_class.get(s, 't4') }}">{{ (s or "setting") | capitalize }}</span>
+{%- endmacro %}
+
+{# The urgency badge for a fix row or finding: exploit tier for CVEs, severity for settings. #}
+{% macro urgency(fix_key, t) -%}
+{% set r = posture_rule(fix_key) %}{% if fix_key.startswith("posture:") %}{{ severity(r.severity if r else none) }}{% else %}{{ tier(t) }}{% endif %}
+{%- endmacro %}
+
 {% macro status(dev) -%}
 {% set h = health(dev) %}<span class="dot {{ h[0] }}">{{ h[1] }}</span>
 {%- endmacro %}
@@ -12,15 +21,17 @@
   <thead><tr><th>Fix</th><th class="num">Risk</th><th>Urgency</th>{% if show_devices %}<th class="num">Devices</th>{% endif %}<th class="num">CVEs closed</th><th class="num">Known exploited</th><th class="num">Top EPSS</th><th class="num">Top CVSS</th></tr></thead>
   <tbody>
   {% for f in fixes %}
+    {% set setting = f.fix_key.startswith("posture:") %}
     <tr>
       <td><a href="/fix?key={{ quote(f.fix_key) }}{% if client_id %}&amp;client={{ client_id }}{% endif %}"><strong>{{ f.label }}</strong></a>{% if f.overdue %} <span class="badge bad">Overdue on {{ f.overdue }} device{{ "s" if f.overdue != 1 }}</span>{% endif %}<br><span class="muted">{{ f.subject }}</span></td>
       <td class="num"><strong>{{ f.risk | risk }}</strong></td>
-      <td>{{ tier(f.tier) }}</td>
+      <td>{{ urgency(f.fix_key, f.tier) }}</td>
       {% if show_devices %}<td class="num">{{ f.devices }}</td>{% endif %}
+      {% if setting %}<td class="num muted" colspan="4">Windows setting</td>{% else %}
       <td class="num">{{ f.cves }}</td>
       <td class="num">{% if f.kev %}<span class="t1">{{ f.kev }}</span>{% else %}0{% endif %}</td>
       <td class="num">{{ f.epss | pct }}</td>
-      <td class="num">{{ f.cvss | score }}</td>
+      <td class="num">{{ f.cvss | score }}</td>{% endif %}
     </tr>
   {% endfor %}
   </tbody>
@@ -37,16 +48,19 @@
   <thead><tr><th>CVE</th>{% if show_subject %}<th>Affects</th>{% endif %}{% if why %}<th class="num">Risk</th>{% endif %}<th>Urgency</th><th class="num">EPSS</th><th class="num">CVSS</th>{% if why %}<th>Deadline</th><th>Exception</th>{% else %}<th>First seen</th>{% endif %}</tr></thead>
   <tbody>
   {% for f in findings %}
+    {% set setting = f.source == "posture" %}
     <tr>
-      <td><a class="mono" href="https://nvd.nist.gov/vuln/detail/{{ f.cve_id }}" rel="noopener noreferrer" target="_blank">{{ f.cve_id }}</a>{% if f.kev %} <span class="badge t1">KEV</span>{% endif %}</td>
+      <td>{% if setting %}<a href="/fix?key={{ quote(f.fix_key) }}">{{ f.subject }}</a>
+          {% else %}<a class="mono" href="https://nvd.nist.gov/vuln/detail/{{ f.cve_id }}" rel="noopener noreferrer" target="_blank">{{ f.cve_id }}</a>{% if f.kev %} <span class="badge t1">KEV</span>{% endif %}{% endif %}</td>
       {% if show_subject %}<td>{{ f.subject }} <span class="muted">{{ f.subject_version or "" }}</span></td>{% endif %}
       {% if why %}<td class="num"><strong>{{ f.risk | risk }}</strong><span class="why">{{ why[f.id].formula() }}</span></td>{% endif %}
-      <td>{{ tier(f.exploit_tier) }}</td>
-      <td class="num">{{ f.epss | pct }}</td>
-      <td class="num">{{ f.cvss | score }}</td>
+      <td>{{ urgency(f.fix_key, f.exploit_tier) }}</td>
+      <td class="num">{{ "-" if setting else f.epss | pct }}</td>
+      <td class="num">{{ "-" if setting else f.cvss | score }}</td>
       {% if why %}
       {% set d = deadline(f) %}<td class="{{ d[0] }}">{{ d[1] }}</td>
       <td>{% if f.exception_id and excs[f.exception_id] %}{% set e = excs[f.exception_id] %}<a href="/exceptions?client={{ e.client_id }}#x{{ e.id }}">{{ reasons[e.reason][0] }}</a> <span class="muted">until {{ e.expires_on.isoformat() }}</span>
+          {% elif setting %}<a href="/exceptions/new?device={{ dev.id }}&amp;fix={{ quote(f.fix_key) }}">Add</a>
           {% else %}<a href="/exceptions/new?device={{ dev.id }}&amp;cve={{ f.cve_id }}">Add</a>{% endif %}</td>
       {% else %}
       <td>{{ ago(f.first_seen) }}</td>

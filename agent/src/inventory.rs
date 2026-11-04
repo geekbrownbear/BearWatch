@@ -5,6 +5,7 @@
 //! - Windows version, build and revision (UBR): HKLM\...\Windows NT\CurrentVersion
 //! - Installed KBs: Component Based Servicing packages in state Installed or Permanent
 //! - Programs: the Uninstall keys (64-bit, 32-bit, and each loaded user hive)
+//! - Settings for the server's posture rules: see posture.rs
 
 use std::collections::BTreeSet;
 
@@ -13,6 +14,7 @@ use sha2::{Digest, Sha256};
 use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
 
+use crate::posture::{self, Posture};
 use crate::wua::WuaResult;
 use crate::{Result, VERSION};
 
@@ -58,6 +60,9 @@ pub struct Inventory {
     pub software: Vec<Program>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wua: Option<WuaResult>,
+    /// Only once the server has sent a read list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posture: Option<Posture>,
 }
 
 pub struct Identity {
@@ -210,9 +215,11 @@ pub fn software() -> Vec<Program> {
     out.into_iter().filter(|p| seen.insert((p.name.to_lowercase(), p.version.clone()))).collect()
 }
 
-pub fn collect(wua: Option<WuaResult>) -> Result<Inventory> {
+/// `reads`: the posture read list and its hash, if the server has sent one.
+pub fn collect(wua: Option<WuaResult>, reads: Option<(&str, &[String])>) -> Result<Inventory> {
     let (kbs, pending_kbs) = kbs();
-    let mut inv = Inventory { hash: String::new(), agent_version: VERSION, hostname: hostname(), os: os_info()?, kbs, pending_kbs, software: software(), wua };
+    let posture = reads.map(|(hash, list)| posture::collect(hash, list));
+    let mut inv = Inventory { hash: String::new(), agent_version: VERSION, hostname: hostname(), os: os_info()?, kbs, pending_kbs, software: software(), wua, posture };
     inv.hash = hash(&inv)?;
     Ok(inv)
 }
@@ -221,7 +228,7 @@ pub fn collect(wua: Option<WuaResult>) -> Result<Inventory> {
 /// always produces the same hash and an unchanged PC never uploads.
 fn hash(inv: &Inventory) -> Result<String> {
     let mut h = Sha256::new();
-    h.update(serde_json::to_vec(&(&inv.hostname, &inv.os, &inv.kbs, &inv.pending_kbs, &inv.software, &inv.wua))?);
+    h.update(serde_json::to_vec(&(&inv.hostname, &inv.os, &inv.kbs, &inv.pending_kbs, &inv.software, &inv.wua, &inv.posture))?);
     Ok(h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect())
 }
 

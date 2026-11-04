@@ -3,6 +3,8 @@
 //! Every heartbeat (15 min): one small request carrying the hash of the last inventory.
 //! Every collect interval (4 h, jittered): re-read the registry in background mode; the
 //! server answers whether it wants the upload (only when the hash changed).
+//! When the heartbeat's posture hash differs from the one the agent holds, it fetches the new
+//! read list, reads again and uploads.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -12,7 +14,7 @@ use crate::client::{Api, Plan, Revoked};
 use crate::config::{self, Config};
 use crate::inventory::{self, Inventory};
 use crate::logger::log;
-use crate::{system, wua, Result};
+use crate::{posture, system, wua, Result};
 
 pub struct Agent {
     path: PathBuf,
@@ -30,8 +32,19 @@ impl Agent {
 
     fn collect(&mut self) -> Result<()> {
         let wua = self.cfg.wua.clone();
-        self.inv = Some(system::background(|| inventory::collect(wua))?);
+        let reads = self.cfg.posture_hash.as_deref().map(|h| (h, self.cfg.posture_reads.as_slice()));
+        self.inv = Some(system::background(|| inventory::collect(wua, reads))?);
         Ok(())
+    }
+
+    /// The server's posture rules changed (or this agent has none yet): fetch the new read list.
+    fn refresh_posture(&mut self) -> Result<()> {
+        let mut p = self.api.posture(&self.cfg.token)?;
+        p.reads.truncate(posture::MAX_READS);
+        log(&format!("posture rules {}: {} values to read", p.hash, p.reads.len()));
+        self.cfg.posture_hash = Some(p.hash);
+        self.cfg.posture_reads = p.reads;
+        config::save(&self.path, &self.cfg)
     }
 
     /// One heartbeat, plus whatever the server asks for. Returns the server's schedule.
@@ -42,7 +55,11 @@ impl Agent {
         let hash = self.inv.as_ref().map(|i| i.hash.clone());
         let plan = self.api.heartbeat(&self.cfg.token, hash.as_deref())?;
         let mut upload = plan.upload || force_upload;
-        if plan.collect_now && !collect {
+        let new_rules = plan.posture_hash.is_some() && plan.posture_hash != self.cfg.posture_hash;
+        if new_rules {
+            self.refresh_posture()?;
+        }
+        if (plan.collect_now && !collect) || new_rules {
             self.collect()?;
             upload = true;
         }
@@ -58,7 +75,8 @@ impl Agent {
         if upload {
             let inv = self.inv.as_ref().expect("collected above");
             let bytes = self.api.upload(&self.cfg.token, inv)?;
-            log(&format!("uploaded inventory: {} programs, {} KBs, {bytes} bytes", inv.software.len(), inv.kbs.len()));
+            let settings = inv.posture.as_ref().map_or(0, |p| p.values.len());
+            log(&format!("uploaded inventory: {} programs, {} KBs, {settings} settings, {bytes} bytes", inv.software.len(), inv.kbs.len()));
             self.cfg.last_upload_hash = Some(inv.hash.clone());
             config::save(&self.path, &self.cfg)?;
         }

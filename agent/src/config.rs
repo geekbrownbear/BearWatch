@@ -1,4 +1,5 @@
-//! Agent state: server URL, device token, last uploaded hash, last Windows Update result.
+//! Agent state: server URL, device token, last uploaded hash, last Windows Update result, and
+//! the posture read list the server sent last.
 //!
 //! Lives in %ProgramData%\BearWatch\agent.json. The folder is locked to SYSTEM and
 //! Administrators, because the device token lets anyone holding it report for this PC.
@@ -21,6 +22,11 @@ pub struct Config {
     pub last_upload_hash: Option<String>,
     #[serde(default)]
     pub wua: Option<WuaResult>,
+    /// Hash and list of the settings values the server's posture rules read.
+    #[serde(default)]
+    pub posture_hash: Option<String>,
+    #[serde(default)]
+    pub posture_reads: Vec<String>,
 }
 
 pub fn default_dir() -> PathBuf {

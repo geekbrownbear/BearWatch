@@ -3,9 +3,11 @@
   POST /api/agent/enroll     site enrollment key   -> device token
   POST /api/agent/heartbeat  device token          -> whether to upload, collect now, run the WUA check
   POST /api/agent/inventory  device token, gzip    -> stored, matched later by the worker
+  POST /api/agent/posture    device token          -> the settings values to read (posture rules)
 
 The heartbeat carries the hash of the agent's latest inventory, so an unchanged PC never
-uploads. Matching runs in the worker, not in the request, so a check-in returns in
+uploads. It also returns the hash of the posture read list; an agent holding a different list
+fetches the new one, reads again and uploads. Matching runs in the worker, not in the request, so a check-in returns in
 milliseconds no matter how much software a PC has.
 """
 
@@ -16,7 +18,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from . import inventory, tenants
+from . import inventory, posture, tenants
 from .config import get_settings
 from .db import session_scope
 from .intel.common import utcnow
@@ -88,6 +90,7 @@ def _plan(dev: Device, site: Site, inventory_hash: str | None) -> dict:
         "wua_due": bool(wua_due),
         "heartbeat_seconds": cfg.heartbeat_seconds,
         "collect_seconds": cfg.collect_seconds,
+        "posture_hash": posture.ruleset().hash,  # agents before 0.2.0 ignore it
     }
 
 
@@ -109,6 +112,17 @@ def heartbeat(hb: Heartbeat, authorization: str = Header(default="")) -> dict:
             raise HTTPException(401, "unknown device token; re-enroll")
         dev.last_seen, dev.agent_version = utcnow(), hb.agent_version
         return _plan(dev, s.get(Site, dev.site_id), hb.inventory_hash)
+
+
+@router.post("/posture")
+def posture_reads(authorization: str = Header(default="")) -> dict:
+    """The registry values (and Windows API checks) the posture rules need. Read-only on the PC;
+    the agent refuses anything outside its own allowlist even if this list asked for it."""
+    with session_scope() as s:
+        if tenants.device_for_token(s, _token(authorization)) is None:
+            raise HTTPException(401, "unknown device token; re-enroll")
+    rs = posture.ruleset()
+    return {"hash": rs.hash, "reads": rs.reads}
 
 
 @router.post("/inventory", status_code=202)

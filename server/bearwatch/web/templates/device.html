@@ -39,7 +39,7 @@
 <div class="card">
 {% for f in fixes %}
   <details{% if loop.first %} open{% endif %}>
-    <summary><span class="grow">{{ f.label }}</span>{% if f.overdue %}<span class="badge bad">Overdue</span>{% endif %}{{ m.tier(f.tier) }}<span class="muted">Risk {{ f.risk | risk }}, {{ f.cves }} CVE{{ "s" if f.cves != 1 }}</span></summary>
+    <summary><span class="grow">{{ f.label }}</span>{% if f.overdue %}<span class="badge bad">Overdue</span>{% endif %}{{ m.urgency(f.fix_key, f.tier) }}<span class="muted">Risk {{ f.risk | risk }}, {% if f.fix_key.startswith("posture:") %}Windows setting{% else %}{{ f.cves }} CVE{{ "s" if f.cves != 1 }}{% endif %}</span></summary>
     {{ m.cve_table(by_fix[f.fix_key][:50], why=why, excs=excs, dev=dev) }}
     <p><a href="/exceptions/new?device={{ dev.id }}&amp;fix={{ quote(f.fix_key) }}">Add an exception for this whole fix on {{ dev.hostname }}</a></p>
     {% if by_fix[f.fix_key] | length > 50 %}<p class="muted">Showing the 50 most urgent. <a href="/fix?key={{ quote(f.fix_key) }}&amp;client={{ client.id }}">See all {{ by_fix[f.fix_key] | length }} on the fix page</a>.</p>{% endif %}
@@ -48,6 +48,31 @@
 </div>
 {% else %}
 <div class="table-wrap"><p class="empty">{% if dev.last_match_at %}No open findings.{% else %}Findings appear a minute after the first inventory.{% endif %}</p></div>
+{% endif %}
+
+<h2>Security settings</h2>
+{% if settings is none %}
+{% if (dev.agent_version or "0.0").startswith(("0.0", "0.1")) %}
+<p class="muted">Not reported. This device runs agent {{ dev.agent_version or "(unknown)" }}, which reads only installed software and updates. Settings checks need agent 0.2.0 or later.</p>
+{% else %}
+<p class="muted">Waiting for the agent's next upload, within 15 minutes.</p>
+{% endif %}
+{% else %}
+{% set failing = settings | selectattr("status", "equalto", "fail") | list %}
+<p>Checked {{ ago(dev.posture_at) }}. {{ failing | length }} of {{ settings | length }} checks fail{% if failing %}, and each one is listed under fixes above{% endif %}.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Check</th><th>Area</th><th>Severity</th><th>Result</th></tr></thead>
+  <tbody>
+  {% for r in settings %}
+    <tr>
+      <td>{% if r.status == "fail" %}<a href="/fix?key={{ quote(r.rule.fix_key) }}&amp;client={{ client.id }}">{{ r.rule.title }}</a>{% else %}{{ r.rule.title }}{% endif %}</td>
+      <td class="muted">{{ r.rule.category }}</td>
+      <td>{{ m.severity(r.rule.severity) }}</td>
+      <td class="{{ 'bad' if r.status == 'fail' else 'ok' if r.status == 'pass' else 'muted' }}">{{ {"fail": "Fails", "pass": "Passes", "unknown": "Not checked yet"}[r.status] }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
 {% endif %}
 
 <h2>Windows Update cross-check</h2>
@@ -95,7 +120,7 @@
 <h2>History</h2>
 {% if events %}
 <div class="table-wrap"><table>
-  <thead><tr><th>When</th><th>Event</th><th>CVE</th><th>Affects</th></tr></thead>
+  <thead><tr><th>When</th><th>Event</th><th>CVE or setting</th><th>Affects</th></tr></thead>
   <tbody>
   {% for e, f in events %}
     <tr><td>{{ ago(e.at) }}</td><td class="{{ 'ok' if e.event == 'fixed' else 'warn' if e.event == 'reopened' else '' }}">{{ e.event | capitalize }}</td><td class="mono">{{ f.cve_id }}</td><td>{{ f.subject }}</td></tr>
