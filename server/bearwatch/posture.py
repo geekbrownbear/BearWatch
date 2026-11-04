@@ -17,12 +17,16 @@ Values from the agent:
 import hashlib
 import json
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from sqlalchemy.orm import Session
+
 from .config import get_settings
+from .intel.common import utcnow
+from .models import SyncState
 
 # Keep in step with agent/src/posture.rs. Settings and policy keys only: no SAM or SECURITY
 # hive, no user hives, no application data.
@@ -123,8 +127,12 @@ class Ruleset:
 
     def __post_init__(self):
         self.reads = sorted({r for rule in self.rules for r in rule.reads})
-        # Only the reads go into the hash: editing a title or a text needs no agent round trip.
+        # Only the reads go into the hash agents see: editing a title or a text needs no agent
+        # round trip.
         self.hash = hashlib.sha256(json.dumps(self.reads).encode()).hexdigest()[:16]
+        # Everything, for the server's own use: any change means findings must be re-judged.
+        content = json.dumps([asdict(r) for r in self.rules], sort_keys=True)
+        self.content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
         self.by_id = {r.id: r for r in self.rules}
 
 
@@ -191,6 +199,27 @@ def ruleset(path: Path | None = None) -> Ruleset:
 
 def rule(rule_id: str) -> Rule | None:
     return ruleset().by_id.get(rule_id)
+
+
+SYNC_KEY = "posture_rules"
+
+
+def rematch_if_changed(s: Session) -> int:
+    """Queue every device for re-evaluation when the rules differ from the ones findings were
+    last judged by (a deploy changed a condition, a severity or a text). A rule change that
+    keeps the same reads never reaches agents, so nothing else would refresh those findings.
+    Returns the number of devices queued."""
+    from .findings import mark_all_for_rematch  # findings imports this module
+
+    rs, now = ruleset(), utcnow()
+    st = s.get(SyncState, SYNC_KEY)
+    if st is not None and st.cursor == rs.content_hash:
+        return 0
+    if st is None:
+        st = SyncState(source=SYNC_KEY)
+        s.add(st)
+    st.cursor, st.last_started, st.last_success, st.last_status, st.rows = rs.content_hash, now, now, "ok", len(rs.rules)
+    return mark_all_for_rematch(s)
 
 
 @dataclass(frozen=True)

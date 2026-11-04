@@ -205,7 +205,7 @@ def overview(request: Request, user: str = Depends(auth.current_user)):
     with session_scope() as s:
         clients = client_rows(s)
         fixes = fix_rows(s, limit=15)
-        feeds = s.scalars(select(SyncState).order_by(SyncState.source)).all()
+        feeds = s.scalars(select(SyncState).where(SyncState.source != posture.SYNC_KEY).order_by(SyncState.source)).all()
         return render(request, "overview.html", user, clients=clients, fixes=fixes, feeds=feeds, totals={
             "devices": sum(c["devices"] for c in clients),
             "silent": sum(c["silent"] for c in clients),

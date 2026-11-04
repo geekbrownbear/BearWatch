@@ -17,7 +17,8 @@ as a fix on the dashboard with a risk score, a deadline and exceptions, next to 
 
 So a new or corrected rule reaches every agent within 15 minutes of a server deploy, with no
 agent update. Editing only a rule's title or text does not change the hash, so agents are not
-asked to read again.
+asked to read again. Any change to the rules file (a condition, a severity, a text) makes the
+worker re-judge every device from its stored values within 30 seconds of the deploy.
 
 ## What the agent will and won't read
 

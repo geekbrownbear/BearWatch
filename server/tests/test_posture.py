@@ -106,7 +106,7 @@ def _open(s) -> dict[str, Finding]:
     return {f.subject_key: f for f in s.scalars(select(Finding).where(Finding.source == "posture", Finding.status == "open"))}
 
 
-def test_posture_end_to_end(session):
+def test_posture_end_to_end(session, monkeypatch):
     key = _seed()
     with TestClient(app) as c:
         _sign_in(c)
@@ -165,6 +165,32 @@ def test_posture_end_to_end(session):
         # Junk values are refused: only numbers, true/false, "set" or null.
         bad = _inv("dddddddd", _values(**{LLMNR: "hunter2"}))
         assert _post_inv(c, token, bad).status_code == 422
+
+        # A deploy changes a rule's logic but not its reads: agents see the same hash and upload
+        # nothing, so the worker must re-judge on its own. LLMNR now passes when it is on.
+        _post_inv(c, token, _inv("ffffffff", _values(**{LLMNR: None})))  # every value read again
+        with db.session_scope() as s:
+            findings.evaluate_pending(s)
+            assert set(_open(s)) == {"llmnr-on"}
+        with db.session_scope() as s:
+            assert posture.rematch_if_changed(s) == 1  # first look: records the rules, queues all
+            s.get(Device, 1).needs_match = False
+        with db.session_scope() as s:
+            assert posture.rematch_if_changed(s) == 0  # unchanged rules: nothing to do
+        text = get_settings().posture_rules_path.read_text(encoding="utf-8")
+        changed = posture.parse(text.replace("DNSClient:EnableMulticast', op = \"!=\", value = 0", "DNSClient:EnableMulticast', op = \"==\", value = 0"))
+        assert changed.hash == rs.hash and changed.content_hash != rs.content_hash
+        monkeypatch.setattr(posture, "ruleset", lambda path=None: changed)
+        with db.session_scope() as s:
+            assert posture.rematch_if_changed(s) == 1 and s.get(Device, 1).needs_match
+            findings.evaluate_pending(s)
+            assert _open(s) == {}
+        monkeypatch.undo()
+        with db.session_scope() as s:
+            posture.rematch_if_changed(s)
+            findings.evaluate_pending(s)
+            assert set(_open(s)) == {"llmnr-on"}  # back to the real rule
+        assert "POSTURE_RULES" not in c.get("/").text.upper().replace("POSTURE RULES", "")
 
         # An older agent takes over: the stored values are dropped, not judged again, and the
         # open finding stays open (no data is not a fix).
