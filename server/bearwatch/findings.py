@@ -43,13 +43,15 @@ def _os_findings(s: Session, dev: Device) -> dict[tuple[str, str, str], Current]
         for cve in g["closed"]:
             fix_for.setdefault(cve, g)
     out = {}
+    pending = set(dev.pending_kbs or [])
     for o in r.open:
         g = fix_for.get(o.cve_id)
         kb = g["kb"] if g else (o.fixes[0]["kb"] if o.fixes else "unknown")
         if not kb.isdigit():
             label = f"Install the update for {o.cve_id}"
-        elif dev.reboot_pending:
-            # Often the update is already installed and only the restart is missing.
+        elif kb in pending:
+            # This exact update is installed; only the restart is missing. Other open fixes on
+            # the same device still need installing, so they keep the plain label.
             label = f"Install KB{kb} (a restart is pending)"
         else:
             label = f"Install KB{kb}"
@@ -92,9 +94,11 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
     now = utcnow()
     current: dict[tuple[str, str, str], Current] = {}
     errors = []
+    os_checked = False
     if dev.os_product and dev.os_build:
         try:
             current.update(_os_findings(s, dev))
+            os_checked = True
         except LookupError as e:  # MSRC data not loaded yet for this product
             errors.append(str(e))
     elif dev.os_build:
@@ -117,8 +121,14 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
             counts["reopened"] += 1
         f.subject, f.subject_version, f.fix_key, f.fix_label, f.last_seen = c.subject[:400], c.subject_version, c.fix_key, c.fix_label, now
         f.exploit_tier, f.kev, f.epss, f.cvss = c.ctx.exploit_tier, bool(c.ctx.kev), c.ctx.epss, c.ctx.cvss
+    kept = 0
     for k, f in existing.items():
         if k not in current and f.status == "open":
+            if k[0] == "os" and not os_checked:
+                # No OS data to judge by (unknown build, MSRC gap): absence is not evidence
+                # of a fix, so leave these open as they were.
+                kept += 1
+                continue
             f.status, f.fixed_at = "fixed", now
             events.append((f, "fixed"))
             counts["fixed"] += 1
@@ -127,7 +137,7 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
 
     dev.needs_match, dev.last_match_at = False, now
     dev.match_error = "; ".join(errors) or None
-    counts["open"] = len(current)
+    counts["open"] = len(current) + kept
     s.flush()
     return counts
 

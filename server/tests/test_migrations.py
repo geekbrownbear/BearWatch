@@ -11,7 +11,7 @@ def test_migrations_match_models(tmp_path):
     engine = db.init_db(url)
     with engine.begin() as conn:
         command.check(db._alembic_config(conn))  # raises if models and migrations differ
-        assert conn.execute(text("select version_num from alembic_version")).scalar() == "0003"
+        assert conn.execute(text("select version_num from alembic_version")).scalar() == "0004"
 
 
 def test_pre_alembic_database_is_stamped(tmp_path):

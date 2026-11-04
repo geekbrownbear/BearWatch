@@ -53,7 +53,12 @@ Details that matter for accuracy:
 - **Build beats KB.** When MSRC gives a comparable fixed build, the device's running build
   decides. This matters: an update waiting for a restart already shows in `Get-HotFix` (and in
   most KB-list tools) as installed, but the PC is still running the old build and is still
-  exposed. BearWatch reports those CVEs as open and labels the fix "a restart is pending".
+  exposed. BearWatch reports those CVEs as open. The agent also sends the KBs that servicing
+  lists as installed but waiting for a restart (CBS state 0x60), and only a fix in that list is
+  labeled "a restart is pending". Other open fixes on the same PC still say "Install".
+- **No OS data is not a fix.** When a build cannot be mapped to an MSRC product, or MSRC rows
+  for it are missing, OS matching is skipped and existing Windows findings stay open. The
+  device page shows why in its match error.
 - **Fix grouping counts supersedence.** "Install KB X" closes every open CVE that update would
   close, not only the CVEs that list KB X directly.
 - **Platform-bound CPE rules.** NVD writes "Chrome on macOS" as Chrome AND macOS. Those

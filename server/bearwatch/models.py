@@ -213,6 +213,8 @@ class Device(Base):
     os_product: Mapped[str | None] = mapped_column(String(200))  # MSRC product name, None if unknown build
     # An update is installed but waits for a restart; the running build is still the old one.
     reboot_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # KB numbers (digits only) installed but waiting for that restart. Agents before 0.1.1 omit them.
+    pending_kbs: Mapped[list | None] = mapped_column(JSON)
     inventory_hash: Mapped[str | None] = mapped_column(String(64))
     enrolled_at: Mapped[datetime] = mapped_column(DateTime)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime)

@@ -123,3 +123,33 @@ def test_agent_api_checks_token_and_size_before_reading(session):
         # Enroll and heartbeat are tiny, so their cap is too.
         assert c.post("/api/agent/heartbeat", content=b"{" + b" " * 20_000 + b"}", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}).status_code == 413
         assert c.post("/api/agent/heartbeat", json={"agent_version": "0.1.0"}, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+def test_restart_label_is_per_kb_and_missing_os_data_fixes_nothing(session):
+    key = _seed()
+    with TestClient(app) as c:
+        token = c.post("/api/agent/enroll", json={"enroll_key": key, "machine_guid": GUID, "hostname": "h", "agent_version": "0.1.1"}).json()["token"]
+
+        def label():
+            _evaluate()
+            with db.session_scope() as s:
+                f = s.scalars(select(Finding).where(Finding.cve_id == "CVE-2026-0002")).one()
+                return f.status, f.fix_label
+
+        # A restart is pending, but for some other update: KB5050001 still has to be installed.
+        inv = _inventory("10.0.22631.4200", "131.0.6778.86", "aaaaaaaa")
+        inv["os"]["reboot_pending"], inv["pending_kbs"] = True, ["KB5099999"]
+        _post_inv(c, token, inv)
+        assert label() == ("open", "Install KB5050001")
+
+        # KB5050001 itself is installed and waiting: now the label says so.
+        inv["pending_kbs"], inv["hash"] = ["KB5050001"], "bbbbbbbb"
+        _post_inv(c, token, inv)
+        assert label() == ("open", "Install KB5050001 (a restart is pending)")
+
+        # A build this release cannot map: no OS verdict, so the OS finding stays open.
+        _post_inv(c, token, _inventory("10.0.99999.1", "131.0.6778.86", "cccccccc"))
+        assert _evaluate() == {"found": 0, "fixed": 0, "reopened": 0, "open": 1}
+        assert label()[0] == "open"
+        with db.session_scope() as s:
+            assert "unknown Windows build" in s.scalars(select(Device)).one().match_error

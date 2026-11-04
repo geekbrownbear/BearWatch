@@ -54,6 +54,7 @@ class Inventory(BaseModel):
     hostname: str = Field(min_length=1, max_length=255)
     os: OsInfo
     kbs: list[str] = Field(default=[], max_length=2000)
+    pending_kbs: list[str] = Field(default=[], max_length=200)
     software: list[Program] = Field(default=[], max_length=5000)
     wua: WuaResult | None = None
 
@@ -70,6 +71,8 @@ def store(s: Session, dev: Device, inv: Inventory) -> None:
     s.execute(delete(DeviceKb).where(DeviceKb.device_id == dev.id))
     kbs = {k.upper().removeprefix("KB").strip() for k in inv.kbs}
     s.add_all(DeviceKb(device_id=dev.id, kb=k) for k in sorted(kbs) if k.isdigit())
+    pending = {k.upper().removeprefix("KB").strip() for k in inv.pending_kbs}
+    dev.pending_kbs = sorted(k for k in pending - kbs if k.isdigit() and len(k) <= 10)
 
     s.execute(delete(DeviceSoftware).where(DeviceSoftware.device_id == dev.id))
     seen: set[tuple[str, str]] = set()

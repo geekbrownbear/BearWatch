@@ -22,6 +22,7 @@ const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 /// nothing there. Some 32-bit installers still write this literal path in the user hive.
 const UNINSTALL_USER_WOW: &str = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
 const CBS: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing";
+const CBS_INSTALL_PENDING: u32 = 0x60;
 const CBS_INSTALLED: u32 = 0x70;
 const CBS_PERMANENT: u32 = 0x80;
 
@@ -51,6 +52,9 @@ pub struct Inventory {
     pub hostname: String,
     pub os: OsInfo,
     pub kbs: Vec<String>,
+    /// Installed but waiting for a restart (CBS "install pending").
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_kbs: Vec<String>,
     pub software: Vec<Program>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wua: Option<WuaResult>,
@@ -124,26 +128,30 @@ fn find_kb(s: &str) -> Option<String> {
     None
 }
 
-/// KBs whose servicing package is fully installed. A package waiting for a restart does not
-/// count yet, which is also why the server trusts the running build over this list.
-pub fn kbs() -> Vec<String> {
-    let mut out = BTreeSet::new();
-    let Some(packages) = hklm(&format!(r"{CBS}\Packages")) else { return vec![] };
+/// (KBs whose servicing package is fully installed, KBs installed but waiting for a restart).
+/// A pending package does not count as installed yet, which is also why the server trusts the
+/// running build over the first list. The second lets it say which fix needs only a restart.
+pub fn kbs() -> (Vec<String>, Vec<String>) {
+    let (mut out, mut pending) = (BTreeSet::new(), BTreeSet::new());
+    let Some(packages) = hklm(&format!(r"{CBS}\Packages")) else { return (vec![], vec![]) };
     for name in packages.enum_keys().flatten() {
         if !name.starts_with("Package_for_") {
             continue; // thousands of component packages; only these carry update identities
         }
         let Ok(pkg) = packages.open_subkey_with_flags(&name, KEY_READ) else { continue };
         let state: u32 = pkg.get_value("CurrentState").unwrap_or(0);
-        if state != CBS_INSTALLED && state != CBS_PERMANENT {
-            continue;
-        }
+        let into = match state {
+            CBS_INSTALLED | CBS_PERMANENT => &mut out,
+            CBS_INSTALL_PENDING => &mut pending,
+            _ => continue,
+        };
         let location: String = pkg.get_value("InstallLocation").unwrap_or_default();
         if let Some(kb) = find_kb(&name).or_else(|| find_kb(&location)) {
-            out.insert(kb);
+            into.insert(kb);
         }
     }
-    out.into_iter().collect()
+    let pending = pending.difference(&out).cloned().collect();
+    (out.into_iter().collect(), pending)
 }
 
 fn read_uninstall(root: &RegKey, path: &str, flags: u32, scope: &'static str, out: &mut BTreeSet<Program>) {
@@ -203,7 +211,8 @@ pub fn software() -> Vec<Program> {
 }
 
 pub fn collect(wua: Option<WuaResult>) -> Result<Inventory> {
-    let mut inv = Inventory { hash: String::new(), agent_version: VERSION, hostname: hostname(), os: os_info()?, kbs: kbs(), software: software(), wua };
+    let (kbs, pending_kbs) = kbs();
+    let mut inv = Inventory { hash: String::new(), agent_version: VERSION, hostname: hostname(), os: os_info()?, kbs, pending_kbs, software: software(), wua };
     inv.hash = hash(&inv)?;
     Ok(inv)
 }
@@ -212,7 +221,7 @@ pub fn collect(wua: Option<WuaResult>) -> Result<Inventory> {
 /// always produces the same hash and an unchanged PC never uploads.
 fn hash(inv: &Inventory) -> Result<String> {
     let mut h = Sha256::new();
-    h.update(serde_json::to_vec(&(&inv.hostname, &inv.os, &inv.kbs, &inv.software, &inv.wua))?);
+    h.update(serde_json::to_vec(&(&inv.hostname, &inv.os, &inv.kbs, &inv.pending_kbs, &inv.software, &inv.wua))?);
     Ok(h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect())
 }
 
