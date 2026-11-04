@@ -87,8 +87,9 @@ form.inline { display: inline; margin: 0; }
 .form-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin: 10px 0; }
 label { display: flex; flex-direction: column; gap: 4px; color: var(--text-3); font-size: 13px; }
 label.check { flex-direction: row; align-items: center; gap: 8px; }
-input[type=text], input[type=password], select { background: var(--bg-deep); color: var(--text); border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; font: inherit; min-width: 220px; }
-input:focus, select:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
+input[type=text], input[type=password], input[type=date], select, textarea { background: var(--bg-deep); color: var(--text); border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; font: inherit; min-width: 220px; }
+textarea { width: 100%; min-height: 90px; resize: vertical; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
 
 .notice { border: 1px solid var(--line-strong); border-left: 4px solid var(--lime); background: var(--bg-deep); border-radius: var(--radius); padding: 14px 16px; margin: 14px 0; }
 .notice.error { border-left-color: var(--bad); }
@@ -96,10 +97,14 @@ input:focus, select:focus { outline: 2px solid var(--cyan); outline-offset: 1px;
 pre.cmd { background: var(--bg-deep); border: 1px solid var(--line); border-radius: 8px; padding: 12px; color: var(--text); overflow-x: auto; }
 
 .login { max-width: 380px; margin: 60px auto; }
+.why { display: block; color: var(--text-3); font-size: 11px; font-weight: 400; white-space: nowrap; }
+.radios { display: grid; gap: 8px; margin: 10px 0; }
+.radios label { flex-direction: row; align-items: baseline; gap: 8px; color: var(--text-2); font-size: 14px; }
+.narrow { max-width: 720px; }
 
 @media (max-width: 640px) {
   h1 { font-size: 24px; }
   .who { margin-left: 0; }
-  input[type=text], input[type=password], select { min-width: 0; width: 100%; }
+  input[type=text], input[type=password], input[type=date], select { min-width: 0; width: 100%; }
   .form-row > * { width: 100%; }
 }

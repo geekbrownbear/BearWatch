@@ -3,6 +3,7 @@
 {% block main %}
 <p class="eyebrow">Client</p>
 <h1>{{ client.name }}</h1>
+<p><a href="/exceptions?client={{ client.id }}">Exceptions for {{ client.name }}</a></p>
 
 <h2>Fixes</h2>
 {{ m.fix_table(fixes, client_id=client.id) }}
@@ -10,7 +11,7 @@
 <h2>Devices</h2>
 {% if devices %}
 <div class="table-wrap"><table>
-  <thead><tr><th>Device</th><th>Site</th><th>Windows</th><th>Agent</th><th>Last check-in</th><th class="num">Open findings</th><th class="num">Known exploited</th></tr></thead>
+  <thead><tr><th>Device</th><th>Site</th><th>Windows</th><th>Agent</th><th>Last check-in</th><th class="num">Top risk</th><th class="num">Open findings</th><th class="num">Known exploited</th><th class="num">Overdue</th></tr></thead>
   <tbody>
   {% for r in devices %}
     <tr>
@@ -19,8 +20,10 @@
       <td>{{ r.device.os_caption or "Waiting for inventory" }} <span class="muted mono">{{ r.device.os_build or "" }}</span></td>
       <td>{{ m.status(r.device) }}</td>
       <td>{{ ago(r.device.last_seen) }}</td>
+      <td class="num"><strong>{{ r.risk | risk }}</strong></td>
       <td class="num">{{ r.open }}</td>
       <td class="num">{% if r.exploited %}<span class="t1">{{ r.exploited }}</span>{% else %}0{% endif %}</td>
+      <td class="num">{% if r.overdue %}<span class="bad">{{ r.overdue }}</span>{% else %}0{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Exceptions · BearWatch{% endblock %}
+{% block main %}
+<p class="eyebrow">{% if client %}<a href="/clients/{{ client.id }}">{{ client.name }}</a>{% else %}All clients{% endif %}</p>
+<h1>Exceptions</h1>
+<p class="muted">Add one from a device page or a fix page. Only false positives and compensating controls lower the risk score. Every exception pauses the fix deadline until it ends.</p>
+
+<h2>Active</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Covers</th><th>Reason</th><th>Note</th><th class="num">Open findings held</th><th>Ends</th><th>Added</th><th></th></tr></thead>
+  <tbody>
+  {% for e, c, d in active %}
+    <tr id="x{{ e.id }}">
+      <td>{{ m.scope_text(c, d, None, e.fix_key, e.cve_id) }}</td>
+      <td><strong>{{ reasons[e.reason][0] }}</strong></td>
+      <td>{{ e.note }}</td>
+      <td class="num">{{ held.get(e.id, 0) }}</td>
+      <td class="{{ 'warn' if (e.expires_on - today).days < 14 else '' }}">{{ e.expires_on.isoformat() }}</td>
+      <td><span class="muted">{{ e.created_by }}, {{ ago(e.created_at) }}</span></td>
+      <td><form class="inline" method="post" action="/exceptions/{{ e.id }}/revoke"><button class="link" type="submit">End now</button></form></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="empty">No active exceptions.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+
+{% if ended %}
+<h2>Ended</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Covers</th><th>Reason</th><th>Note</th><th>Ended</th><th>Added</th></tr></thead>
+  <tbody>
+  {% for e, c, d in ended %}
+    <tr id="x{{ e.id }}">
+      <td>{{ m.scope_text(c, d, None, e.fix_key, e.cve_id) }}</td>
+      <td>{{ reasons[e.reason][0] }}</td>
+      <td>{{ e.note }}</td>
+      <td>{% if e.revoked_at %}Ended early by {{ e.revoked_by }}, {{ ago(e.revoked_at) }}{% else %}Expired {{ e.expires_on.isoformat() }}{% endif %}</td>
+      <td><span class="muted">{{ e.created_by }}, {{ ago(e.created_at) }}</span></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endblock %}

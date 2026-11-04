@@ -15,7 +15,8 @@ Windows endpoints                     Client site LAN                Internet
                        |  tenants: client > site > device                    |
                        |  intel store: MSRC, NVD, KEV x2, EPSS, vulnrichment,|
                        |    WinGet                                           |
-                       |  matcher (2 paths) > findings (found/fixed events)  |
+                       |  matcher (2 paths) > findings > risk, deadlines,    |
+                       |    exceptions                                       |
                        +--> fix-grouped dashboard, monthly PDF, HaloPSA <----+
 ```
 
@@ -29,7 +30,8 @@ Windows endpoints                     Client site LAN                Internet
 | Fix-grouped dashboard, Cloudflare Access sign-in | **Phase 1, built** | `server/bearwatch/web/`, `auth.py` |
 | bw-agent (Rust, Windows service) | **Phase 1, built** | `agent/` |
 | Schema migrations (Alembic) | **Phase 1, built** | `server/bearwatch/migrations/` |
-| Posture checks, sensor mode, exceptions, SLAs, risk score | Phase 2 | |
+| Risk score, fix deadlines, exceptions | **Phase 2, built** | `server/bearwatch/scoring.py`, [scoring.md](scoring.md) |
+| Posture checks, sensor mode, unmanaged devices | Phase 2 | |
 | External monitoring, HaloPSA, monthly PDF | Phase 3 | |
 
 ## Two matching paths, never mixed
