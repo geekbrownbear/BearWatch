@@ -1,3 +1,6 @@
+import os
+
+import pytest
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
 
@@ -29,3 +32,23 @@ def test_pre_alembic_database_is_stamped(tmp_path):
     with engine.connect() as conn:
         assert conn.execute(text("select count(*) from cve")).scalar() == 1
         assert {"device", "finding", "client"} <= set(inspect(conn).get_table_names())
+
+
+# Points at a throwaway Postgres database; the test drops every table in it. CI sets this.
+PG_URL = os.environ.get("BEARWATCH_TEST_POSTGRES_URL")
+
+
+@pytest.mark.skipif(not PG_URL, reason="set BEARWATCH_TEST_POSTGRES_URL to a throwaway Postgres database")
+def test_postgres_upgrade_downgrade_upgrade():
+    """Every migration runs both ways on Postgres, which the SQLite tests can miss."""
+    engine = db.init_db(PG_URL)
+    try:
+        with engine.begin() as conn:
+            cfg = db._alembic_config(conn)
+            command.check(cfg)
+            command.downgrade(cfg, "base")
+            assert set(inspect(conn).get_table_names()) <= {"alembic_version"}
+            command.upgrade(cfg, "head")
+            command.check(cfg)
+    finally:
+        engine.dispose()

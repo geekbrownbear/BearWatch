@@ -76,7 +76,7 @@ fn search_blocking() -> std::result::Result<Vec<WuaEntry>, String> {
                 if let Ok(cats) = u.Categories() {
                     for j in 0..cats.Count().unwrap_or(0) {
                         if let Ok(cat) = cats.get_Item(j) {
-                            if cat.Name().map(|n| n.to_string() == "Security Updates").unwrap_or(false) {
+                            if cat.Name().map(|n| n == "Security Updates").unwrap_or(false) {
                                 is_security = true;
                             }
                         }
