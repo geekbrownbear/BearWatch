@@ -146,6 +146,9 @@ def test_exception_scope_is_checked(session):
             other = tenants.create_client(s, "Other client").id
         assert c.get("/exceptions/new", params={"device": dev_id}).status_code == 400  # needs a fix or a CVE
         assert c.get("/exceptions/new", params={"device": dev_id, "cve": "not-a-cve"}).status_code == 400
+        # CVE numbers can be longer than 7 digits; only ids too long to store are refused.
+        assert c.get("/exceptions/new", params={"device": dev_id, "cve": "CVE-2026-12345678"}).status_code == 200
+        assert c.get("/exceptions/new", params={"device": dev_id, "cve": "CVE-2026-" + "1" * 24}).status_code == 400
         assert c.get("/exceptions/new", params={"device": dev_id, "client": other, "cve": CHROME_CVE}).status_code == 400
         assert c.get("/exceptions/new", params={"client": 999, "cve": CHROME_CVE}).status_code == 404
         # Cross-site posts are refused like every other form.

@@ -287,7 +287,9 @@ def device_settings(request: Request, device_id: int, criticality: str = Form(""
 
 # --- exceptions ----------------------------------------------------------------------------
 
-CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
+# CVE numbers have 4 or more digits with no fixed maximum. The cap only keeps the id inside
+# the String(32) cve_id columns ("CVE-YYYY-" is 9 characters).
+CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,23}$")
 
 
 @dataclass
