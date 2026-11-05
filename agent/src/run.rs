@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::client::{Api, NotSensor, Plan, Revoked};
+use crate::client::{Api, NotSensor, Plan, Revoked, SensorPlan};
 use crate::config::{self, Config};
 use crate::inventory::{self, Inventory};
 use crate::logger::log;
@@ -24,8 +24,12 @@ pub struct Agent {
     cfg: Config,
     api: Api,
     inv: Option<Inventory>,
-    /// A sensor scan running on its own thread; its result is the host count the server stored.
-    sensor: Option<JoinHandle<Result<u64>>>,
+    /// A sensor scan running on its own thread. Its result: when the upload got its answer, and
+    /// the host count the server stored.
+    sensor: Option<JoinHandle<(Instant, Result<u64>)>>,
+    /// When this process saw the server's 409 to a sensor upload. None while there is no
+    /// decline, or when it was loaded from disk (it then predates every heartbeat to come).
+    declined_at: Option<Instant>,
 }
 
 fn unix_now() -> u64 {
@@ -38,11 +42,44 @@ fn sensor_due(last: Option<u64>, now: u64, interval_minutes: u64) -> bool {
     last.is_none_or(|t| now < t || now - t >= interval_minutes.saturating_mul(60))
 }
 
+/// Apply one heartbeat plan to the sensor schedule in `cfg`. Returns true when a scan should
+/// start now (and records `now` as its attempt time). Kept free of I/O so the order of events
+/// can be tested.
+///
+/// - No `sensor` in the plan: not the sensor (any more). Forget the schedule and any 409.
+/// - `sensor` in a plan whose heartbeat was sent after the 409 (`sent`, compared with
+///   `declined_at`): the server only names the PC it accepts uploads from, so this is
+///   authoritative. The decline is cleared and the normal schedule resumes. A decline loaded
+///   from disk happened before this process started, so the first heartbeat naming the PC
+///   clears it and a restart can never leave the sensor stuck.
+/// - `sensor` in a plan requested before the 409 arrived: stale, stay off until the next one.
+/// - Otherwise scan when due and none is running.
+fn sensor_plan(cfg: &mut Config, plan: Option<&SensorPlan>, declined_at: Option<Instant>, sent: Instant, now: u64, running: bool) -> bool {
+    let Some(sp) = plan else {
+        cfg.sensor_last_scan = None;
+        cfg.sensor_declined = false;
+        return false;
+    };
+    if cfg.sensor_declined {
+        if declined_at.is_some_and(|at| sent <= at) {
+            return false;
+        }
+        cfg.sensor_declined = false;
+    }
+    if running || !sensor_due(cfg.sensor_last_scan, now, sp.interval_minutes) {
+        return false;
+    }
+    // Recorded before the scan, so a failed scan or upload waits for the next interval
+    // instead of retrying at every heartbeat.
+    cfg.sensor_last_scan = Some(now);
+    true
+}
+
 impl Agent {
     pub fn load(path: &Path) -> Result<Self> {
         let cfg = config::load(path)?;
         let api = Api::new(&cfg.server)?;
-        Ok(Self { path: path.to_path_buf(), cfg, api, inv: None, sensor: None })
+        Ok(Self { path: path.to_path_buf(), cfg, api, inv: None, sensor: None, declined_at: None })
     }
 
     /// Start a sensor scan when the plan says this PC is the sensor and one is due.
@@ -53,43 +90,34 @@ impl Agent {
     /// So the loop only starts the scan here and picks up its result at a later heartbeat; the
     /// thread scans and uploads on its own, with its own handle to the HTTPS client. At most one
     /// scan runs at a time, and a service stop simply ends it with the process.
-    fn sensor_step(&mut self, plan: &Plan) -> Result<()> {
+    /// `sent`: when the heartbeat that returned `plan` was sent.
+    fn sensor_step(&mut self, plan: &Plan, sent: Instant) -> Result<()> {
         self.finish_sensor(false)?;
-        let Some(sp) = &plan.sensor else {
-            // Not (or no longer) the sensor: forget the schedule and any earlier 409.
-            if self.cfg.sensor_last_scan.is_some() || self.cfg.sensor_declined {
-                self.cfg.sensor_last_scan = None;
-                self.cfg.sensor_declined = false;
-                config::save(&self.path, &self.cfg)?;
+        let before = (self.cfg.sensor_last_scan, self.cfg.sensor_declined);
+        let start = sensor_plan(&mut self.cfg, plan.sensor.as_ref(), self.declined_at, sent, unix_now(), self.sensor.is_some());
+        if !self.cfg.sensor_declined {
+            if before.1 && plan.sensor.is_some() {
+                log("this PC is the site's sensor again; scanning resumes on the normal schedule");
             }
-            return Ok(());
-        };
-        if self.cfg.sensor_declined || self.sensor.is_some() {
+            self.declined_at = None;
+        }
+        if before != (self.cfg.sensor_last_scan, self.cfg.sensor_declined) {
+            config::save(&self.path, &self.cfg)?;
+        }
+        if !start {
             return Ok(());
         }
-        let now = unix_now();
-        if !sensor_due(self.cfg.sensor_last_scan, now, sp.interval_minutes) {
-            return Ok(());
-        }
-        // Recorded before the scan, so a failed scan or upload waits for the next interval
-        // instead of retrying at every heartbeat.
-        self.cfg.sensor_last_scan = Some(now);
-        config::save(&self.path, &self.cfg)?;
         let (api, token) = (self.api.clone(), self.cfg.token.clone());
         let spawned = std::thread::Builder::new().name("sensor".into()).spawn(move || {
             let payload = sensor::scan();
-            match api.sensor(&token, &payload) {
-                Ok(hosts) => {
-                    log(&format!("uploaded sensor scan: server stored {hosts} hosts"));
-                    Ok(hosts)
-                }
-                Err(e) => {
-                    if !e.is::<NotSensor>() {
-                        log(&format!("sensor upload failed, next try in one interval: {e}"));
-                    }
-                    Err(e)
-                }
+            let result = api.sensor(&token, &payload);
+            let answered = Instant::now();
+            match &result {
+                Ok(hosts) => log(&format!("uploaded sensor scan: server stored {hosts} hosts")),
+                Err(e) if !e.is::<NotSensor>() => log(&format!("sensor upload failed, next try in one interval: {e}")),
+                Err(_) => {} // logged by finish_sensor
             }
+            (answered, result)
         });
         match spawned {
             Ok(h) => self.sensor = Some(h),
@@ -99,17 +127,19 @@ impl Agent {
     }
 
     /// Pick up a finished sensor scan (or wait for a running one when `wait`). A 409 means the
-    /// server moved the sensor role elsewhere: stop until the plan asks again.
+    /// server does not take uploads from this PC right now: no scan until a heartbeat sent
+    /// after it names this PC again. The attempt time stays, so a resumed schedule is the
+    /// normal one.
     fn finish_sensor(&mut self, wait: bool) -> Result<()> {
         if !self.sensor.as_ref().is_some_and(|h| wait || h.is_finished()) {
             return Ok(());
         }
         let Some(handle) = self.sensor.take() else { return Ok(()) };
         match handle.join() {
-            Ok(Err(e)) if e.is::<NotSensor>() => {
-                log(&e.to_string());
-                self.cfg.sensor_last_scan = None;
+            Ok((at, Err(e))) if e.is::<NotSensor>() => {
+                log(&format!("{e}; no scans until a heartbeat names it again"));
                 self.cfg.sensor_declined = true;
+                self.declined_at = Some(at);
                 config::save(&self.path, &self.cfg)?;
             }
             Ok(_) => {} // logged by the scan thread
@@ -141,8 +171,9 @@ impl Agent {
             self.collect()?;
         }
         let hash = self.inv.as_ref().map(|i| i.hash.clone());
+        let sent = Instant::now();
         let plan = self.api.heartbeat(&self.cfg.token, hash.as_deref())?;
-        self.sensor_step(&plan)?;
+        self.sensor_step(&plan, sent)?;
         let mut upload = plan.upload || force_upload;
         let new_rules = plan.posture_hash.is_some() && plan.posture_hash != self.cfg.posture_hash;
         if new_rules {
@@ -247,7 +278,58 @@ pub fn once(path: &Path, force_wua: bool, force_upload: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::sensor_due;
+    use super::{sensor_due, sensor_plan};
+    use crate::client::SensorPlan;
+    use crate::config::Config;
+    use std::time::{Duration, Instant};
+
+    const SENSOR: Option<&SensorPlan> = Some(&SensorPlan { interval_minutes: 360 });
+
+    /// 409, then a heartbeat naming the PC, then the scan falls due on the normal schedule.
+    #[test]
+    fn heartbeat_after_409_resumes_scanning() {
+        let (mut cfg, t0, now) = (Config::default(), Instant::now(), 1_800_000_000);
+        assert!(sensor_plan(&mut cfg, SENSOR, None, t0, now, false)); // first scan starts
+        assert!(!sensor_plan(&mut cfg, SENSOR, None, t0, now + 60, true)); // still running
+        // Its upload gets a 409 (what finish_sensor records).
+        let at = t0 + Duration::from_secs(90);
+        cfg.sensor_declined = true;
+        // A plan from a heartbeat sent before the 409 arrived is stale: stay off, even if due.
+        assert!(!sensor_plan(&mut cfg, SENSOR, Some(at), t0 + Duration::from_secs(80), now + 400 * 60, false));
+        assert!(cfg.sensor_declined);
+        // The next heartbeat names this PC: resume, on the normal schedule (not due yet).
+        let hb = at + Duration::from_secs(900);
+        assert!(!sensor_plan(&mut cfg, SENSOR, Some(at), hb, now + 15 * 60, false));
+        assert!(!cfg.sensor_declined);
+        assert_eq!(cfg.sensor_last_scan, Some(now));
+        // An interval after the last attempt, the scan is due again.
+        assert!(sensor_plan(&mut cfg, SENSOR, Some(at), hb + Duration::from_secs(900), now + 360 * 60, false));
+        assert_eq!(cfg.sensor_last_scan, Some(now + 360 * 60));
+    }
+
+    /// A heartbeat after the 409 without `sensor` keeps it off and forgets the schedule.
+    #[test]
+    fn heartbeat_without_sensor_after_409_stays_off() {
+        let (t0, now) = (Instant::now(), 1_800_000_000);
+        let mut cfg = Config { sensor_last_scan: Some(now), sensor_declined: true, ..Default::default() };
+        assert!(!sensor_plan(&mut cfg, None, Some(t0), t0 + Duration::from_secs(900), now + 400 * 60, false));
+        assert_eq!((cfg.sensor_last_scan, cfg.sensor_declined), (None, false));
+    }
+
+    /// A decline persisted before a restart is cleared by the first heartbeat naming the PC.
+    #[test]
+    fn restart_with_persisted_decline_resumes() {
+        let now = 1_800_000_000;
+        let mut cfg = Config { sensor_last_scan: Some(now - 400 * 60), sensor_declined: true, ..Default::default() };
+        // A new process has no 409 time of its own: every heartbeat it sends comes after the 409.
+        assert!(sensor_plan(&mut cfg, SENSOR, None, Instant::now(), now, false));
+        assert!(!cfg.sensor_declined);
+        assert_eq!(cfg.sensor_last_scan, Some(now));
+        // Cleared even when the next scan is not due yet; it then waits for its interval.
+        let mut cfg = Config { sensor_last_scan: Some(now - 60), sensor_declined: true, ..Default::default() };
+        assert!(!sensor_plan(&mut cfg, SENSOR, None, Instant::now(), now, false));
+        assert!(!cfg.sensor_declined);
+    }
 
     #[test]
     fn sensor_schedule() {
