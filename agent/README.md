@@ -1,8 +1,8 @@
 # bw-agent
 
 The BearWatch Windows agent. It reads what is installed (Windows build and revision, installed
-KBs, programs) from the registry and reports it to the BearWatch server, which does all the
-vulnerability matching. See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#the-agent-light-by-design)
+KBs, programs) and the security settings the server's posture rules ask for from the registry,
+and reports them to the BearWatch server, which does all the matching and judging. See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#the-agent-light-by-design)
 for how it stays light.
 
 ## Build
@@ -33,7 +33,7 @@ The enrollment key comes from the dashboard (Clients and sites, Add a site) or
 
 | Command | What it does |
 |---|---|
-| `bw-agent inventory` | Prints the JSON it would send, plus time, CPU, memory and upload size. Sends nothing. |
+| `bw-agent inventory [--reads FILE]` | Prints the JSON it would send, plus time, CPU, memory and upload size. Sends nothing. Settings come from the read list the server last sent (readable from an elevated prompt), or from `FILE`, a JSON list of reads, for testing [posture rules](../docs/posture.md). |
 | `bw-agent run-once [--wua] [--force]` | One check-in now. `--wua` runs the Windows Update cross-check regardless of power and idle state. |
 | `bw-agent uninstall` | Stops and removes the service and deletes `%ProgramData%\BearWatch` (the device token). |
 

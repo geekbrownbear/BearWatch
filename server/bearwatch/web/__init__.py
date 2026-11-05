@@ -19,7 +19,7 @@ from sqlalchemy import String, and_, case, cast, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import __version__, auth, scoring, tenants
+from .. import __version__, auth, posture, scoring, tenants
 from ..config import get_settings
 from ..db import session_scope
 from ..intel.common import utcnow
@@ -76,9 +76,19 @@ def deadline(f: Finding) -> tuple[str, str]:
 
 
 TIER_LABEL = {1: "Exploited", 2: "Exploit code", 3: "Likely", 4: "No signal"}
+# Posture severities borrow the tier badge colors: critical is as red as "exploited".
+SEVERITY_CLASS = {"critical": "t1", "high": "t2", "medium": "t3", "low": "t4"}
+SEVERITY_ORDER = {s: i for i, s in enumerate(posture.SEVERITIES)}
+
+
+def posture_rule(fix_key: str) -> posture.Rule | None:
+    """The rule behind a "posture:<id>" fix key, or None (not posture, or a rule since removed)."""
+    return posture.rule(fix_key.removeprefix("posture:")) if fix_key.startswith("posture:") else None
+
 
 templates.env.globals.update(ago=ago, health=health, deadline=deadline, tier_label=TIER_LABEL, version=__version__, quote=quote,
-                             importance_label=scoring.IMPORTANCE_LABEL, reasons=scoring.REASONS)
+                             importance_label=scoring.IMPORTANCE_LABEL, reasons=scoring.REASONS, posture_rule=posture_rule,
+                             severity_class=SEVERITY_CLASS)
 templates.env.filters["pct"] = lambda v: "-" if v is None else f"{v * 100:.1f}%"
 templates.env.filters["score"] = lambda v: "-" if v is None else f"{v:.1f}"
 templates.env.filters["risk"] = lambda v: "-" if v is None else f"{v:.0f}"
@@ -195,7 +205,7 @@ def overview(request: Request, user: str = Depends(auth.current_user)):
     with session_scope() as s:
         clients = client_rows(s)
         fixes = fix_rows(s, limit=15)
-        feeds = s.scalars(select(SyncState).order_by(SyncState.source)).all()
+        feeds = s.scalars(select(SyncState).where(SyncState.source != posture.SYNC_KEY).order_by(SyncState.source)).all()
         return render(request, "overview.html", user, clients=clients, fixes=fixes, feeds=feeds, totals={
             "devices": sum(c["devices"] for c in clients),
             "silent": sum(c["silent"] for c in clients),
@@ -221,14 +231,15 @@ def fix_page(request: Request, key: str, client: int | None = None, user: str = 
             q = q.where(Site.client_id == client)
         rows = s.execute(q.order_by(Finding.exploit_tier, Finding.epss.desc().nulls_last(), Finding.cve_id)).all()
         if not rows:
-            return render(request, "fix.html", user, key=key, label=None, devices=[], cves=[], client=s.get(Client, client) if client else None)
+            return render(request, "fix.html", user, key=key, label=None, devices=[], cves=[], client=s.get(Client, client) if client else None,
+                          rule=posture_rule(key))
         devices: dict[int, dict] = {}
         cves: dict[str, Finding] = {}
         for f, d in rows:
             devices.setdefault(d.id, {"device": d, "cves": 0, "version": f.subject_version})["cves"] += 1
             cves.setdefault(f.cve_id, f)
         return render(request, "fix.html", user, key=key, label=rows[0][0].fix_label, devices=sorted(devices.values(), key=lambda x: x["device"].hostname.lower()),
-                      cves=list(cves.values()), client=s.get(Client, client) if client else None)
+                      cves=list(cves.values()), client=s.get(Client, client) if client else None, rule=posture_rule(key))
 
 
 @router.get("/devices/{device_id}", response_class=HTMLResponse)
@@ -252,7 +263,16 @@ def device_page(request: Request, device_id: int, user: str = Depends(auth.curre
                            .where(FindingEvent.device_id == device_id).order_by(FindingEvent.at.desc(), FindingEvent.id.desc()).limit(40)).all()
         return render(request, "device.html", user, dev=dev, site=site, client=client, fixes=fixes, by_fix=by_fix, software=software,
                       wua=wua, cross=_cross_check(dev, open_findings, wua), events=events, why=why, excs=excs,
-                      importance=scoring.importance(dev))
+                      importance=scoring.importance(dev), settings=_settings(dev))
+
+
+def _settings(dev: Device) -> list[posture.Result] | None:
+    """Every posture rule for this device, failures first. None until the agent reports any."""
+    if not dev.posture:
+        return None
+    results = posture.evaluate(posture.ruleset(), dev.posture.get("values") or {}, dev.is_server, posture.build_number(dev.os_build))
+    status_order = {"fail": 0, "unknown": 1, "pass": 2}
+    return sorted(results, key=lambda r: (status_order[r.status], SEVERITY_ORDER[r.rule.severity], r.rule.title))
 
 
 def _cross_check(dev: Device, open_findings: list[Finding], wua: list[WuaUpdate]) -> dict | None:

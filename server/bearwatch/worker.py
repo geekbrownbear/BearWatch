@@ -1,8 +1,9 @@
 """Long-running worker for the Compose `worker` service.
 
 Two loops on one timer:
-- every 30 s, evaluate devices whose inventory changed (or whose findings need a refresh), and
-  rescore findings whose exception has ended;
+- every 30 s, evaluate devices whose inventory changed (or whose findings need a refresh),
+  rescore findings whose exception has ended, and queue every device again if the posture
+  rules changed since the last deploy;
 - every 5 min, run any feed sync whose last success is older than its interval, then queue
   every device for re-evaluation so new CVEs and KEV listings reach findings without waiting
   for the agent. A failing feed backs off so it never blocks the others.
@@ -12,7 +13,7 @@ import logging
 import time
 from datetime import timedelta
 
-from . import findings, scoring
+from . import findings, posture, scoring
 from .db import init_db, session_scope
 from .intel.common import run_sync, utcnow
 from .jobs import JOBS
@@ -59,6 +60,9 @@ def run_feeds() -> None:
 def run_devices() -> None:
     with session_scope() as s:
         scoring.rescore_lapsed(s)  # exceptions that ended since the last tick
+        n = posture.rematch_if_changed(s)  # a deploy changed the posture rules
+        if n:
+            log.info("posture rules changed; %d devices queued for re-evaluation", n)
     while True:
         with session_scope() as s:
             if findings.evaluate_pending(s) == 0:

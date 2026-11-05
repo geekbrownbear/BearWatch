@@ -51,6 +51,20 @@ evaluation, when a device's settings change, and when an exception starts or end
 
 This follows the Qualys TruRisk and Tenable VPR plus asset criticality split.
 
+### Windows settings (posture checks)
+
+A failed [posture rule](posture.md) has no CVE, so its severity stands in for the tier and CVSS.
+The same formula and deadlines then apply.
+
+| Severity | Counts as | Base | Deadline | Examples |
+|---|---|---|---|---|
+| Critical | tier 2, 9.0 | 83.5 | 14 days | No working antivirus, SMBv1 server on, WDigest on |
+| High | tier 3, 8.0 | 62 | 30 days | Firewall off, NTLMv1 allowed, UAC off |
+| Medium | tier 4, 6.0 | 24 | 90 days | LLMNR on, no LAPS |
+| Low | tier 4, 3.0 | 12 | 90 days | Remote Registry starts automatically |
+
+A critical setting ranks below a known exploited CVE and above any CVE without exploit code.
+
 ## Fix deadlines (built in Phase 2)
 
 - Tier 1 or CVSS 9.0 and up: 14 days. CVSS 7.0 and up: 30 days. Everything else: 90 days.

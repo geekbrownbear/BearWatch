@@ -19,6 +19,15 @@ pub struct Plan {
     pub wua_due: bool,
     pub heartbeat_seconds: u64,
     pub collect_seconds: u64,
+    /// Hash of the posture read list. Servers before posture support leave it out.
+    #[serde(default)]
+    pub posture_hash: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PostureReads {
+    pub hash: String,
+    pub reads: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +111,11 @@ impl Api {
     pub fn heartbeat(&self, token: &str, inventory_hash: Option<&str>) -> Result<Plan> {
         let body = json!({"agent_version": VERSION, "inventory_hash": inventory_hash});
         Ok(Self::check(self.post("/api/agent/heartbeat", Some(token)).send_json(body))?.into_json()?)
+    }
+
+    /// The settings values the posture rules need. Fetched only when the heartbeat's hash changes.
+    pub fn posture(&self, token: &str) -> Result<PostureReads> {
+        Ok(Self::check(self.post("/api/agent/posture", Some(token)).send_json(json!({})))?.into_json()?)
     }
 
     /// Gzipped JSON; a typical PC inventory is a few KB on the wire.

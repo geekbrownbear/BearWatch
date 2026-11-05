@@ -37,6 +37,11 @@ REASONS = {
 }
 MAX_EXCEPTION_DAYS = 365
 
+# A failed posture rule has no CVE, so its severity stands in for (tier, CVSS). Through base()
+# and sla_days() that gives: critical 83.5 and 14 days, high 62 and 30 days, medium 24 and
+# 90 days, low 12 and 90 days. A critical setting outranks every CVE without exploit code.
+POSTURE_SEVERITY = {"critical": (2, 9.0), "high": (3, 8.0), "medium": (4, 6.0), "low": (4, 3.0)}
+
 
 def base(tier: int, cvss: float | None) -> float:
     """Tier sets the band and CVSS places the finding inside it. Bands never overlap."""

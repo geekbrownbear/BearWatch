@@ -4,6 +4,9 @@ Each evaluation computes the device's current set of (source, subject, CVE) and 
 with the stored findings: new ones are "found", ones that disappeared are "fixed", and fixed
 ones that come back are "reopened". Nothing is deleted, so reports can show progress.
 
+Failed posture rules (posture.py) are findings too, with source "posture" and the rule id in
+place of a CVE.
+
 Only programs resolved through intel/cpe_overrides.json produce findings. A heuristic match is
 kept on the software row as a suggestion for the overrides file, never counted, because a
 wrong vendor guess would put false CVEs in front of a client.
@@ -16,7 +19,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .intel.common import utcnow
-from . import scoring
+from . import posture, scoring
 from .match import apps, windows
 from .match.enrich import CveContext
 from .models import Device, DeviceKb, DeviceSoftware, Finding, FindingEvent, WingetPackage
@@ -90,6 +93,22 @@ def _app_findings(s: Session, dev: Device) -> dict[tuple[str, str, str], Current
     return out
 
 
+def _posture_findings(dev: Device) -> tuple[dict[tuple[str, str, str], Current], set[str] | None]:
+    """(failed rules as findings, rule ids that could not be judged). None for the second means
+    the device never reported posture (agent before 0.2.0), so nothing can be judged."""
+    if not dev.posture:
+        return {}, None
+    out, unknown = {}, set()
+    for r in posture.evaluate(posture.ruleset(), dev.posture.get("values") or {}, dev.is_server, posture.build_number(dev.os_build)):
+        if r.status == "unknown":
+            unknown.add(r.rule.id)
+        elif r.status == "fail":
+            tier, score = scoring.POSTURE_SEVERITY[r.rule.severity]
+            ctx = CveContext(cve_id=r.rule.id, cvss=score, exploit_tier=tier)
+            out[("posture", r.rule.id, r.rule.id)] = Current(r.rule.title, None, r.rule.fix_key, r.rule.fix, ctx)
+    return out, unknown
+
+
 def evaluate(s: Session, dev: Device) -> dict[str, int]:
     """Recompute one device's findings. Returns counts of found/fixed/reopened/open."""
     now = utcnow()
@@ -105,6 +124,8 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
     elif dev.os_build:
         errors.append(f"unknown Windows build {dev.os_build}; OS findings skipped")
     current.update(_app_findings(s, dev))
+    found, unjudged = _posture_findings(dev)
+    current.update(found)
 
     existing = {(f.source, f.subject_key, f.cve_id): f for f in s.scalars(select(Finding).where(Finding.device_id == dev.id))}
     counts = {"found": 0, "fixed": 0, "reopened": 0}
@@ -125,9 +146,10 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
     kept = 0
     for k, f in existing.items():
         if k not in current and f.status == "open":
-            if k[0] == "os" and not os_checked:
-                # No OS data to judge by (unknown build, MSRC gap): absence is not evidence
-                # of a fix, so leave these open as they were.
+            # No data to judge by: absence is not evidence of a fix, so leave these open as they
+            # were. For OS findings that is an unknown build or an MSRC gap; for posture, an
+            # agent that has not read the values this rule needs yet.
+            if (k[0] == "os" and not os_checked) or (k[0] == "posture" and (unjudged is None or k[1] in unjudged)):
                 kept += 1
                 continue
             f.status, f.fixed_at = "fixed", now

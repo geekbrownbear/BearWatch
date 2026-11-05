@@ -117,3 +117,34 @@ jobs:
           path: agent/target/x86_64-pc-windows-gnu/release/bw-agent.exe
           retention-days: 14
           if-no-files-found: error
+
+  agent-tests:
+    name: Agent tests (Windows)
+    # The job above can only compile the tests: they read the registry and call Windows APIs,
+    # so they have to run on Windows. Built with the runner's own MSVC toolchain; the code
+    # under test is the same as in the GNU build that ships.
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: agent
+    env:
+      RUST_VERSION: "1.88"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup override set "$RUST_VERSION"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent/target
+          key: agent-tests-${{ runner.os }}-rust${{ env.RUST_VERSION }}-${{ hashFiles('agent/Cargo.lock') }}
+          restore-keys: agent-tests-${{ runner.os }}-rust${{ env.RUST_VERSION }}-
+      - name: cargo test
+        run: cargo test --locked

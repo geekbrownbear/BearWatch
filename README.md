@@ -11,8 +11,10 @@ them.
 only when something changes) reports to the server, which keeps findings with found and fixed
 history and shows them on a fix-grouped dashboard behind Cloudflare Access. Every finding has a
 risk score that shows how it was reached, a fix deadline, and can be covered by an exception
-with a reason and an end date. Posture checks, sensor mode and PSA integration come next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/scoring.md](docs/scoring.md) and [agent/README.md](agent/README.md).
+with a reason and an end date. Posture checks flag risky Windows settings (SMBv1, LLMNR, no
+LAPS and more) from rules kept on the server. Sensor mode and PSA integration come next. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/scoring.md](docs/scoring.md),
+[docs/posture.md](docs/posture.md) and [agent/README.md](agent/README.md).
 
 ## Run it locally
 
