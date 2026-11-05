@@ -114,15 +114,20 @@ def _short(name: str | None) -> str | None:
 
 def _managed(s: Session, site: Site) -> tuple[dict[str, int], dict[str, int]]:
     """MAC -> device and short hostname -> device, over the whole client: one office LAN often
-    holds PCs enrolled under more than one site."""
+    holds PCs enrolled under more than one site. A name two PCs share proves nothing, so it is
+    left out: only a name that points at exactly one PC can link a host."""
     by_mac: dict[str, int] = {}
     by_name: dict[str, int] = {}
+    shared: set[str] = set()
     q = select(Device).join(Site, Site.id == Device.site_id).where(Site.client_id == site.client_id)
     for d in s.scalars(q):
         for m in d.macs or []:
             by_mac.setdefault(str(m).lower(), d.id)
         if (k := _short(d.hostname)) is not None:
-            by_name.setdefault(k, d.id)
+            if by_name.setdefault(k, d.id) != d.id:
+                shared.add(k)
+    for k in shared:
+        del by_name[k]
     return by_mac, by_name
 
 
@@ -136,6 +141,35 @@ def match_device(h: NetworkHost, by_mac: dict[str, int], by_name: dict[str, int]
     return None
 
 
+def _merge(hosts: list[Host]) -> dict[str, Host]:
+    """One host can answer on more than one address (two IPs on one adapter, or one host on two
+    of the sensor's networks). What every address showed counts: ports, issues and unchecked
+    ports are combined under the host's key, and a name or vendor from any address fills a gap.
+    A port left unchecked on any address keeps that port's issues open."""
+    out: dict[str, Host] = {}
+    for h in hosts:
+        key = host_key(h)
+        cur = out.get(key)
+        if cur is None:
+            out[key] = h.model_copy(deep=True)
+            continue
+        ports = {p.port: p for p in cur.ports}
+        for p in h.ports:
+            ports.setdefault(p.port, p)
+        cur.ports = list(ports.values())
+        issues = {(i.id, i.port): i for i in cur.issues}
+        for i in h.issues:
+            issues.setdefault((i.id, i.port), i)
+        cur.issues = list(issues.values())
+        cur.unchecked_ports = sorted(set(cur.unchecked_ports) | set(h.unchecked_ports))
+        for f in ("dns", "netbios", "mdns", "upnp"):
+            if not getattr(cur.names, f) and getattr(h.names, f):
+                setattr(cur.names, f, getattr(h.names, f))
+        cur.vendor = cur.vendor or h.vendor
+        cur.workgroup = cur.workgroup or h.workgroup
+    return out
+
+
 def store(s: Session, site: Site, rep: Report) -> int:
     """Record one scan. Returns the number of hosts in it.
 
@@ -147,12 +181,8 @@ def store(s: Session, site: Site, rep: Report) -> int:
     now = utcnow()
     existing ={h.key: h for h in s.scalars(select(NetworkHost).where(NetworkHost.site_id == site.id))}
     by_mac, by_name = _managed(s, site)
-    seen: set[str] = set()
-    for h in rep.hosts:
-        key = host_key(h)
-        if key in seen:  # one host answering on two of the sensor's networks
-            continue
-        seen.add(key)
+    merged = _merge(rep.hosts)
+    for key, h in merged.items():
         row = existing.get(key)
         if row is None:
             row = NetworkHost(site_id=site.id, key=key, first_seen=now, known=False)
@@ -175,7 +205,7 @@ def store(s: Session, site: Site, rep: Report) -> int:
     if site.sensor_first_scan_at is None:
         site.sensor_first_scan_at = now
     s.flush()
-    return len(seen)
+    return len(merged)
 
 
 def _issues(s: Session, host: NetworkHost, found: list[Issue], now: datetime, unchecked: set[int] = frozenset()) -> None:
