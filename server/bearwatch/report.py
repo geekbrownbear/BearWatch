@@ -268,7 +268,7 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
                                                                                         ExternalIssue.status == "open"))} if t_ids else set()
     ips = [t for t in targets if t.kind == "ip"]
     domains = [t for t in targets if t.kind == "domain"]
-    remote_ports = {"port-3389", "port-445", "port-23", "port-5900", "port-135", "port-139"}
+    remote_ports = {"port-3389", "port-445", "port-23", "port-5900", "port-135", "port-137", "port-139"}
     exposed = sorted({t.value for t in ips if any((t.id, c) in ext_open for c in remote_ports)})
     spoofable = sorted({t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-allows-all", "dmarc-missing"))})
     unverified_ips = [t.value for t in ips if t.snapshot is None or t.last_error]

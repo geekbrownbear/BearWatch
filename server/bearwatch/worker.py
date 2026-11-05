@@ -103,12 +103,30 @@ def start_feeds(stop: threading.Event, tick: float = FEED_TICK) -> threading.Thr
     return t
 
 
+def external_loop(stop: threading.Event, tick: float = EXTERNAL_TICK) -> None:
+    """Weekly checks of public addresses and domains, on their own thread: each can wait on a
+    slow lookup or TLS connection, and that must never hold up device evaluation."""
+    while not stop.is_set():
+        try:
+            run_sync("external", external.run_due)
+        except Exception:  # logged in run_sync
+            pass
+        stop.wait(tick)
+
+
+def start_external(stop: threading.Event, tick: float = EXTERNAL_TICK) -> threading.Thread:
+    t = threading.Thread(target=external_loop, args=(stop, tick), name="external", daemon=True)
+    t.start()
+    return t
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     init_db()
     log.info("worker started, jobs: %s", ", ".join(JOBS))
     feeds = start_feeds(threading.Event())
-    last_halo = last_external = 0.0
+    ext = start_external(threading.Event())
+    last_halo = 0.0
     while True:
         try:
             run_devices()
@@ -117,12 +135,9 @@ def main() -> None:
         if time.monotonic() - last_halo >= HALO_TICK:
             last_halo = time.monotonic()
             run_halo()
-        if time.monotonic() - last_external >= EXTERNAL_TICK:
-            last_external = time.monotonic()
-            try:
-                run_sync("external", external.run_due)
-            except Exception:  # logged in run_sync
-                pass
+        if not ext.is_alive():
+            log.error("external check thread stopped; restarting it")
+            ext = start_external(threading.Event())
         if not feeds.is_alive():  # feeds_loop catches everything, so this should never happen
             log.error("feed thread stopped; restarting it")
             feeds = start_feeds(threading.Event())

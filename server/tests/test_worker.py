@@ -84,3 +84,28 @@ def test_rematch_request_during_evaluation_is_kept(session, monkeypatch):
     session.commit()
     session.expire_all()
     assert session.scalars(select(Device)).one().needs_match is True
+
+
+def test_external_checks_run_on_their_own_thread(session, monkeypatch):
+    """A slow external lookup must not hold up device evaluation."""
+    from bearwatch import external
+
+    started, release = threading.Event(), threading.Event()
+
+    def slow(s):
+        started.set()
+        assert release.wait(10)
+        return 0
+
+    monkeypatch.setattr(external, "run_due", slow)
+    stop = threading.Event()
+    t = worker.start_external(stop, tick=0.05)
+    try:
+        assert started.wait(5)
+        done = threading.Event()
+        threading.Thread(target=lambda: (worker.run_devices(), done.set()), daemon=True).start()
+        assert done.wait(5), "device evaluation waited for an external check"
+    finally:
+        release.set()
+        stop.set()
+        t.join(5)
