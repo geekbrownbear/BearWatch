@@ -53,8 +53,11 @@ instance's own API reference at `https://<your instance>/apidoc` before turning 
 |---|---|
 | Sign in | `POST /auth/token`, form fields `grant_type=client_credentials`, `client_id`, `client_secret`, `scope=all`, and `tenant` if set |
 | New ticket | `POST /api/tickets` with a one-item list: `summary`, `details`, `client_id`, and `tickettype_id` if set |
-| Update ticket | `POST /api/tickets` with a one-item list holding `id` and the changed fields (`details`, or `status_id` to close) |
+| Update ticket | `POST /api/tickets` with a one-item list holding `id` and the changed fields (`summary`, `details` and `client_id`, or `status_id` to close) |
 | Private note | `POST /api/actions` with a one-item list: `ticket_id`, `note`, `outcome`, `hiddenfromuser: true` |
 | Is it still open? | `GET /api/tickets/{id}`, reading `status_id` |
 
 In particular, confirm the closed status id and the note outcome name used in your Halo.
+
+Changing a client's Halo client id moves its open BearWatch tickets to the new Halo client on the
+next pass. Clearing the id stops BearWatch managing them: they stay in Halo as they are.
