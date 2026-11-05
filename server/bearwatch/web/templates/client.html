@@ -3,7 +3,7 @@
 {% block main %}
 <p class="eyebrow">Client</p>
 <h1>{{ client.name }}</h1>
-<p><a href="/exceptions?client={{ client.id }}">Exceptions for {{ client.name }}</a></p>
+<p><a href="/exceptions?client={{ client.id }}">Exceptions for {{ client.name }}</a> · Monthly report: <a href="/clients/{{ client.id }}/report">preview</a>, <a href="/clients/{{ client.id }}/report.pdf">PDF</a></p>
 
 <h2>Fixes</h2>
 {{ m.fix_table(fixes, client_id=client.id) }}

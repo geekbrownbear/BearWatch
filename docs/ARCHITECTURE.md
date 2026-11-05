@@ -33,7 +33,8 @@ Windows endpoints                     Client site LAN                Internet
 | Risk score, fix deadlines, exceptions | **Phase 2, built** | `server/bearwatch/scoring.py`, [scoring.md](scoring.md) |
 | Posture checks (Windows settings) | **Phase 2, built** | `server/bearwatch/posture.py`, `intel/posture_rules.toml`, `agent/src/posture.rs`, [posture.md](posture.md) |
 | Sensor mode, unmanaged devices, network issues | **Phase 2, built** | `server/bearwatch/sensor.py`, `agent/src/sensor/`, [sensor.md](sensor.md) |
-| External monitoring, HaloPSA, monthly PDF | Phase 3 | |
+| Monthly client report (PDF), Windows support dates | **Phase 3, built** | `server/bearwatch/report.py`, `lifecycle.py`, `intel/windows_lifecycle.toml`, [report.md](report.md) |
+| External monitoring, HaloPSA | Phase 3 | |
 
 ## Two matching paths, never mixed
 
@@ -164,8 +165,8 @@ server/                 Python package `bearwatch` + tests + Dockerfile
   bearwatch/migrations/ Alembic revisions, applied automatically at startup
   bearwatch/web/        dashboard templates and static files
 agent/                  Rust agent, Dockerfile (cross-compile), build.ps1
-intel/                  curated data checked into git (cpe_overrides.json, posture_rules.toml)
-docs/                   this file, scoring.md, posture.md, sensor.md
+intel/                  curated data checked into git (cpe_overrides.json, posture_rules.toml, windows_lifecycle.toml)
+docs/                   this file, scoring.md, posture.md, sensor.md, report.md
 shared-scan/            (Phase 3) package extracted from Cyber Scan
 ```
 

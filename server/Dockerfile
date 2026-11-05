@@ -3,7 +3,12 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     BEARWATCH_OVERRIDES_PATH=/srv/intel/cpe_overrides.json \
-    BEARWATCH_POSTURE_RULES_PATH=/srv/intel/posture_rules.toml
+    BEARWATCH_POSTURE_RULES_PATH=/srv/intel/posture_rules.toml \
+    BEARWATCH_LIFECYCLE_PATH=/srv/intel/windows_lifecycle.toml
+
+# Pango for WeasyPrint (the monthly PDF report). Fonts come from bearwatch/web/static.
+RUN apt-get update && apt-get install -y --no-install-recommends libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv/server
 

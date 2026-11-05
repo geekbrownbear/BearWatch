@@ -15,6 +15,7 @@ dependencies = [
     "jinja2>=3.1",
     "pyjwt[crypto]>=2.8",
     "python-multipart>=0.0.9",
+    "weasyprint>=63",
 ]
 
 [project.optional-dependencies]

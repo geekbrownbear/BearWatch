@@ -1,0 +1,125 @@
+# When each Windows version stops getting security updates. Used by the monthly report and the
+# device page to flag PCs on a version Microsoft no longer patches.
+#
+# Sources (checked 2026-11-05):
+#   https://learn.microsoft.com/windows/release-health/supported-versions-windows-client
+#   https://learn.microsoft.com/windows/release-health/windows11-release-information
+#   https://learn.microsoft.com/lifecycle/products/windows-10-home-and-pro
+#   https://learn.microsoft.com/lifecycle/announcements/windows-server-2012-r2-end-of-support
+#   https://learn.microsoft.com/lifecycle/products/ (Windows Server 2016, 2019, 2022, 2025)
+#
+# `build` is the third part of the OS build (10.0.<build>.<revision>). Client versions list two
+# dates: Home and Pro editions, and Enterprise and Education editions (36 months instead of 24).
+# Servers list the end of extended support. Paid Extended Security Updates (ESU) are not counted:
+# a PC on ESU still shows as out of support, and the technician can add an exception.
+#
+# Add each new Windows version when it ships; a build missing from this file is "unknown", never
+# "supported".
+
+[[client]]
+build = 10240
+name = "Windows 10, version 1507"
+home_pro = 2017-05-09
+enterprise = 2017-05-09
+
+[[client]]
+build = 19041
+name = "Windows 10, version 2004"
+home_pro = 2021-12-14
+enterprise = 2021-12-14
+
+[[client]]
+build = 19042
+name = "Windows 10, version 20H2"
+home_pro = 2022-05-10
+enterprise = 2023-05-09
+
+[[client]]
+build = 19043
+name = "Windows 10, version 21H1"
+home_pro = 2022-12-13
+enterprise = 2022-12-13
+
+[[client]]
+build = 19044
+name = "Windows 10, version 21H2"
+home_pro = 2023-06-13
+enterprise = 2024-06-11
+
+[[client]]
+build = 19045
+name = "Windows 10, version 22H2"
+home_pro = 2025-10-14
+enterprise = 2025-10-14
+
+[[client]]
+build = 22000
+name = "Windows 11, version 21H2"
+home_pro = 2023-10-10
+enterprise = 2024-10-08
+
+[[client]]
+build = 22621
+name = "Windows 11, version 22H2"
+home_pro = 2024-10-08
+enterprise = 2025-10-14
+
+[[client]]
+build = 22631
+name = "Windows 11, version 23H2"
+home_pro = 2025-11-11
+enterprise = 2026-11-10
+
+[[client]]
+build = 26100
+name = "Windows 11, version 24H2"
+home_pro = 2026-10-13
+enterprise = 2027-10-12
+
+[[client]]
+build = 26200
+name = "Windows 11, version 25H2"
+home_pro = 2027-10-12
+enterprise = 2028-10-10
+
+[[client]]
+build = 28000
+name = "Windows 11, version 26H1"
+home_pro = 2028-03-14
+enterprise = 2029-03-13
+
+[[client]]
+build = 26300
+name = "Windows 11, version 26H2"
+home_pro = 2028-10-10
+enterprise = 2029-10-09
+
+[[server]]
+build = 9200
+name = "Windows Server 2012"
+ends = 2023-10-10
+
+[[server]]
+build = 9600
+name = "Windows Server 2012 R2"
+ends = 2023-10-10
+
+[[server]]
+build = 14393
+name = "Windows Server 2016"
+ends = 2027-01-12
+
+[[server]]
+build = 17763
+name = "Windows Server 2019"
+ends = 2029-01-09
+
+[[server]]
+build = 20348
+name = "Windows Server 2022"
+ends = 2031-10-14
+
+[[server]]
+build = 26100
+name = "Windows Server 2025"
+ends = 2034-10-10

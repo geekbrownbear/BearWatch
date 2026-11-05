@@ -75,6 +75,8 @@
 </table></div>
 {% endif %}
 
+{% if support %}<p class="{{ 'bad' if support.status == 'ended' else 'warn' if support.status == 'ending' else 'muted' }}">{{ support.name }}: {{ support.label }}.</p>{% endif %}
+
 {% if net_hosts or is_sensor %}
 <h2>On the network</h2>
 {% if is_sensor %}<p class="muted">This PC is the network sensor for {{ site.name }}. <a href="/sites/{{ site.id }}/network">See what it found</a>.</p>{% endif %}

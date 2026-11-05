@@ -1,0 +1,301 @@
+"""The monthly client report: a short PDF for a QBR or a cyber insurance renewal.
+
+Everything in it comes from data BearWatch already has. The grade starts at 100 and loses
+points for specific, named problems, and the report lists every deduction, so a client can see
+exactly what moves it. See docs/report.md.
+"""
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+
+from sqlalchemy import and_, distinct, func, select
+from sqlalchemy.orm import Session
+
+from . import lifecycle, sensor
+from .intel.common import utcnow
+from .models import Client, Device, Finding, FindingEvent, NetworkHost, NetworkIssue, Site
+
+SILENT = timedelta(hours=24)
+
+# (points per item, most points in total) for each kind of problem.
+PENALTIES = {
+    "exploited": (15, 45),  # an update that fixes a known exploited vulnerability, not installed
+    "overdue": (5, 25),  # an update past its fix deadline
+    "unsupported": (5, 15),  # a PC on a Windows version that no longer gets security updates
+    "checklist": (5, 30),  # a failed item on the insurance readiness checklist
+    "silent": (2, 10),  # a PC whose agent has not checked in for a day
+}
+GRADES = ((90, "A"), (80, "B"), (70, "C"), (60, "D"))
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def month_bounds(month: date) -> tuple[datetime, datetime]:
+    start = datetime(month.year, month.month, 1)
+    end = datetime(month.year + (month.month == 12), month.month % 12 + 1, 1)
+    return start, end
+
+
+def previous_month(today: date | None = None) -> date:
+    today = today or utcnow().date()
+    first = today.replace(day=1)
+    return (first - timedelta(days=1)).replace(day=1)
+
+
+@dataclass
+class CheckItem:
+    title: str
+    status: str  # pass | fail | unknown
+    detail: str
+
+
+@dataclass
+class Report:
+    client: Client
+    month: date
+    generated: datetime
+    as_of: datetime
+    devices: int = 0
+    servers: int = 0
+    silent: list[str] = field(default_factory=list)
+    open_findings: int = 0
+    open_fixes: int = 0
+    exploited_fixes: int = 0
+    overdue_fixes: int = 0
+    found: int = 0
+    fixed: int = 0
+    fixed_on_time: int = 0
+    trend: list[dict] = field(default_factory=list)
+    top_fixes: list[dict] = field(default_factory=list)
+    windows: list[dict] = field(default_factory=list)
+    settings: list[dict] = field(default_factory=list)
+    network: dict = field(default_factory=dict)
+    network_issues: list[dict] = field(default_factory=list)
+    checklist: list[CheckItem] = field(default_factory=list)
+    score: int = 100
+    grade: str = "A"
+    deductions: list[tuple[int, str]] = field(default_factory=list)
+
+    @property
+    def on_time_rate(self) -> int | None:
+        return round(100 * self.fixed_on_time / self.fixed) if self.fixed else None
+
+
+def _client_devices(s: Session, client_id: int) -> list[Device]:
+    return list(s.scalars(select(Device).join(Site, Site.id == Device.site_id).where(Site.client_id == client_id)
+                          .order_by(func.lower(Device.hostname))))
+
+
+def _status_at(s: Session, device_ids: list[int], when: datetime) -> int:
+    """How many findings were open at `when`, replayed from found/fixed/reopened events."""
+    if not device_ids:
+        return 0
+    last: dict[int, str] = {}
+    q = (select(FindingEvent.finding_id, FindingEvent.event).where(FindingEvent.device_id.in_(device_ids), FindingEvent.at < when)
+         .order_by(FindingEvent.at, FindingEvent.id))
+    for fid, ev in s.execute(q):
+        last[fid] = ev
+    return sum(1 for ev in last.values() if ev in ("found", "reopened"))
+
+
+def build(s: Session, client_id: int, month: date, now: datetime | None = None) -> Report:
+    now = now or utcnow()
+    client = s.get(Client, client_id)
+    if client is None:
+        raise LookupError(f"no client {client_id}")
+    start, end = month_bounds(month)
+    as_of = min(end, now)
+    r = Report(client=client, month=start.date(), generated=now, as_of=as_of)
+
+    devs = _client_devices(s, client_id)
+    ids = [d.id for d in devs]
+    r.devices, r.servers = len(devs), sum(1 for d in devs if d.is_server)
+    r.silent = [d.hostname for d in devs if d.last_seen is None or now - d.last_seen > SILENT]
+
+    # Open work right now (the report describes the state on the day it is made).
+    open_q = select(Finding).where(Finding.device_id.in_(ids), Finding.status == "open") if ids else None
+    open_f = list(s.scalars(open_q)) if ids else []
+    r.open_findings = len(open_f)
+    fixes: dict[str, dict] = {}
+    for f in open_f:
+        g = fixes.setdefault(f.fix_key, {"label": f.fix_label, "devices": set(), "cves": set(), "tier": 4, "risk": 0.0,
+                                         "overdue": False, "source": f.source})
+        g["devices"].add(f.device_id)
+        if f.source != "posture":
+            g["cves"].add(f.cve_id)
+        g["tier"] = min(g["tier"], f.exploit_tier)
+        g["risk"] = max(g["risk"], f.risk or 0.0)
+        if f.due_at is not None and f.due_at < now and f.exception_id is None:
+            g["overdue"] = True
+    r.open_fixes = len(fixes)
+    r.exploited_fixes = sum(1 for g in fixes.values() if g["tier"] == 1)
+    r.overdue_fixes = sum(1 for g in fixes.values() if g["overdue"])
+    top = sorted(fixes.values(), key=lambda g: (-g["risk"], g["tier"], -len(g["devices"]), g["label"]))[:5]
+    r.top_fixes = [{**g, "devices": len(g["devices"]), "cves": len(g["cves"])} for g in top]
+
+    # The month: what was found and fixed, and how many fixes beat their deadline.
+    if ids:
+        events = s.execute(select(FindingEvent.event, Finding.due_at, FindingEvent.at)
+                           .join(Finding, Finding.id == FindingEvent.finding_id)
+                           .where(FindingEvent.device_id.in_(ids), FindingEvent.at >= start, FindingEvent.at < end)).all()
+        r.found = sum(1 for ev, _, _ in events if ev in ("found", "reopened"))
+        fixed = [(due, at) for ev, due, at in events if ev == "fixed"]
+        r.fixed = len(fixed)
+        r.fixed_on_time = sum(1 for due, at in fixed if due is None or at <= due)
+
+    # Six months of trend, ending with this one.
+    m = start.date()
+    months = []
+    for _ in range(6):
+        months.append(m)
+        m = (m - timedelta(days=1)).replace(day=1)
+    for mo in reversed(months):
+        a, b = month_bounds(mo)
+        if ids:
+            found = s.scalar(select(func.count()).select_from(FindingEvent)
+                             .where(FindingEvent.device_id.in_(ids), FindingEvent.event.in_(("found", "reopened")),
+                                    FindingEvent.at >= a, FindingEvent.at < b)) or 0
+            fixed_n = s.scalar(select(func.count()).select_from(FindingEvent)
+                               .where(FindingEvent.device_id.in_(ids), FindingEvent.event == "fixed",
+                                      FindingEvent.at >= a, FindingEvent.at < b)) or 0
+        else:
+            found = fixed_n = 0
+        r.trend.append({"month": mo, "found": found, "fixed": fixed_n, "open": _status_at(s, ids, min(b, now))})
+
+    # Windows versions and their support.
+    by_version: dict[tuple, dict] = {}
+    for d in devs:
+        sup = lifecycle.support(d.os_build, d.os_caption, d.is_server, now.date())
+        key = (sup.name, sup.status, sup.ends)
+        row = by_version.setdefault(key, {"name": sup.name, "status": sup.status, "label": sup.label, "devices": []})
+        row["devices"].append(d.hostname)
+    order = {"ended": 0, "ending": 1, "unknown": 2, "supported": 3}
+    r.windows = sorted(by_version.values(), key=lambda v: (order[v["status"]], v["name"]))
+    unsupported = [h for v in r.windows if v["status"] == "ended" for h in v["devices"]]
+
+    # Windows settings that fail, by how many PCs.
+    if ids:
+        q = (select(Finding.subject_key, func.max(Finding.subject), func.count(distinct(Finding.device_id)))
+             .where(Finding.device_id.in_(ids), Finding.source == "posture", Finding.status == "open")
+             .group_by(Finding.subject_key).order_by(func.count(distinct(Finding.device_id)).desc(), Finding.subject_key))
+        r.settings = [{"rule": k, "title": t, "devices": n} for k, t, n in s.execute(q)]
+    failing = {x["rule"]: x["devices"] for x in r.settings}
+
+    # Network (sensor).
+    sites = list(s.scalars(select(Site).where(Site.client_id == client_id)))
+    has_sensor = any(site.sensor_device_id and site.sensor_scan_at for site in sites)
+    hosts = s.execute(select(NetworkHost, Site).join(Site, Site.id == NetworkHost.site_id)
+                      .where(Site.client_id == client_id, NetworkHost.last_seen >= now - timedelta(days=30))).all()
+    r.network = {
+        "sensor": has_sensor,
+        "hosts": len(hosts),
+        "unmanaged": sum(1 for h, _ in hosts if h.device_id is None),
+        "new": sum(1 for h, site in hosts if sensor.is_new(h, site, now)),
+    }
+    issues = s.execute(select(NetworkIssue, NetworkHost).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
+                       .join(Site, Site.id == NetworkHost.site_id)
+                       .where(Site.client_id == client_id, NetworkIssue.status == "open")
+                       .order_by(NetworkIssue.cvss.desc().nulls_last())).all()
+    r.network_issues = [{"title": i.title, "host": h.name or h.ip, "ip": h.ip, "port": i.port, "severity": sensor.severity(i.cvss),
+                         "solution": i.solution} for i, h in issues]
+    serious_net = sum(1 for x in r.network_issues if x["severity"] in ("critical", "high"))
+
+    # Insurance readiness: things insurers ask about, answered only from what BearWatch measured.
+    # A PC whose agent has not sent settings yet (before 0.2.0) is "not checked", never a pass.
+    checked = [d for d in devs if d.posture is not None]
+    checked_ws = [d for d in checked if not d.is_server]
+
+    def setting(rules: list[str], title: str, ok: str, bad: str, pool: list[Device] | None = None) -> CheckItem:
+        pool = checked if pool is None else pool
+        if not ids:
+            return CheckItem(title, "unknown", "No PCs report to BearWatch yet.")
+        if not pool:
+            return CheckItem(title, "unknown", "Not checked yet. The agents on these PCs need an update first.")
+        n = max((failing.get(x, 0) for x in rules), default=0)
+        if n:
+            return CheckItem(title, "fail", bad.format(pcs=plural(n, "PC"), workstations=plural(n, "workstation"), verb="has" if n == 1 else "have"))
+        gap = len(devs if pool is checked else [d for d in devs if not d.is_server]) - len(pool)
+        return CheckItem(title, "pass", ok + (f" {plural(gap, 'PC')} not checked yet." if gap else ""))
+
+    known_late = any(g["overdue"] and g["tier"] == 1 for g in fixes.values())
+    r.checklist = [
+        setting(["av-unhealthy"], "Antivirus is on and up to date", "On and up to date on every workstation checked.",
+                "Off or out of date on {workstations}.", pool=checked_ws),
+        setting(["firewall-off"], "Windows Firewall is on", "On for every network type on every PC checked.", "Off on {pcs}."),
+        setting(["rdp-without-nla"], "Remote Desktop requires sign-in first", "Every PC checked requires it, or has Remote Desktop off.",
+                "{pcs} accept Remote Desktop without it."),
+        setting(["smb1-server", "smb1-client"], "Old SMBv1 file sharing is off", "Off on every PC checked.", "Still on for {pcs}."),
+        setting(["laps-missing"], "Local admin passwords are unique and rotated", "Every PC checked uses LAPS.", "{pcs} {verb} no LAPS."),
+        CheckItem("Every PC runs a supported Windows version",
+                  "fail" if unsupported else ("pass" if ids else "unknown"),
+                  f"{plural(len(unsupported), 'PC')} no longer {'gets' if len(unsupported) == 1 else 'get'} security updates." if unsupported
+                  else "Every PC still gets security updates." if ids else "No PCs report to BearWatch yet."),
+        CheckItem("Known exploited vulnerabilities are fixed within 14 days",
+                  "fail" if known_late else ("pass" if ids else "unknown"),
+                  "Some are past their 14-day deadline." if known_late
+                  else "None are past their deadline." if ids else "No PCs report to BearWatch yet."),
+        CheckItem("Every PC is monitored", "fail" if r.silent else ("pass" if ids else "unknown"),
+                  f"{plural(len(r.silent), 'PC')} {'has' if len(r.silent) == 1 else 'have'} not checked in for a day." if r.silent
+                  else "Every PC checked in within the last day." if ids else "No PCs report to BearWatch yet."),
+        CheckItem("No unsafe services on the office network",
+                  ("fail" if serious_net else "pass") if has_sensor else "unknown",
+                  (f"{plural(serious_net, 'serious issue')} found." if serious_net else "None found in the last scan.")
+                  if has_sensor else "No network sensor at this office yet."),
+    ]
+
+    # The grade. Items already counted above (Windows support, silent PCs, exploited updates) are
+    # left out of the checklist deduction so nothing costs points twice.
+    def take(kind: str, count: int, text: str) -> None:
+        if count <= 0:
+            return
+        each, most = PENALTIES[kind]
+        r.deductions.append((min(each * count, most), text))
+
+    n = r.exploited_fixes
+    take("exploited", n, f"{plural(n, 'update')} that {'fixes' if n == 1 else 'fix'} vulnerabilities attackers are using, not installed")
+    n = r.overdue_fixes
+    take("overdue", n, f"{plural(n, 'update')} past the fix deadline")
+    n = len(unsupported)
+    take("unsupported", n, f"{plural(n, 'PC')} on a Windows version that no longer gets security updates")
+    fails = [c for c in r.checklist if c.status == "fail" and not c.title.startswith(("Every PC runs", "Every PC is", "Known exploited"))]
+    take("checklist", len(fails), f"{plural(len(fails), 'insurance checklist item')} not met")
+    n = len(r.silent)
+    take("silent", n, f"{plural(n, 'PC')} not checking in")
+    r.score = max(0, 100 - sum(p for p, _ in r.deductions))
+    r.grade = next((g for floor, g in GRADES if r.score >= floor), "F")
+    return r
+
+
+# --- rendering ------------------------------------------------------------------------------
+
+
+def _fmt_date(d) -> str:
+    return f"{d:%B} {d.day}, {d.year}"
+
+
+def render_html(r: Report, screen: bool = False, static: str | None = None) -> str:
+    """The report as one HTML page. `static` is where the fonts and logo load from: a URL path
+    for the browser preview, a file:// URL for WeasyPrint."""
+    from .web import STATIC, templates
+
+    tpl = templates.env.get_template("report.html")
+    return tpl.render(r=r, screen=screen, static=static or STATIC.as_uri(), fmt_date=_fmt_date,
+                      month_name=f"{r.month:%B %Y}", month_short=f"{r.month:%B}")
+
+
+def pdf_available() -> bool:
+    try:
+        import weasyprint  # noqa: F401
+    except (ImportError, OSError):  # OSError: the Pango libraries are missing
+        return False
+    return True
+
+
+def render_pdf(r: Report) -> bytes:
+    from weasyprint import HTML
+
+    from .web import STATIC
+
+    return HTML(string=render_html(r), base_url=STATIC.as_uri() + "/").write_pdf()
