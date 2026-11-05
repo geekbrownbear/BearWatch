@@ -189,6 +189,16 @@ def test_sensor_end_to_end(session):
         assert r.status_code == 303 and "error=" in r.headers["location"]
 
 
+def test_a_scan_of_no_network_is_not_a_scan(session):
+    with db.session_scope() as s:
+        client = tenants.create_client(s, "Lab")
+        site, _ = tenants.create_site(s, client, "Office")
+        empty = _scan()
+        empty["networks"] = []
+        assert sensor.store(s, site, sensor.Report.model_validate(empty)) == 0
+        assert site.sensor_scan_at is None and site.sensor_first_scan_at is None
+
+
 def test_new_sensor_resets_the_baseline(session):
     with db.session_scope() as s:
         client = tenants.create_client(s, "Lab")
