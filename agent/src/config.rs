@@ -30,8 +30,9 @@ pub struct Config {
     /// When the last sensor scan was started (unix seconds), whether or not it succeeded.
     #[serde(default)]
     pub sensor_last_scan: Option<u64>,
-    /// The server answered 409 to a sensor upload. No more scans until a heartbeat plan has come
-    /// without `sensor` and then asks again.
+    /// The server answered 409 to a sensor upload. No scan until a heartbeat sent after the
+    /// 409 names this PC the sensor again (see run::sensor_plan). Kept across a restart, and
+    /// cleared by the first heartbeat after it.
     #[serde(default)]
     pub sensor_declined: bool,
 }
