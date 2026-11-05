@@ -104,6 +104,9 @@ def test_sensor_end_to_end(session):
         hosts = _hosts(session)
         assert hosts["172.26.71.221"].device_id == sensor_id  # by MAC
         assert hosts["172.26.71.44"].device_id == laptop_id  # by name, case-insensitive
+        # Next scan the name lookup fails for the laptop: same MAC, so it stays linked.
+        r = _post_scan(c, sensor_tok, _scan(_host("172.26.71.44", LAPTOP_MAC)))
+        assert _hosts(session)["172.26.71.44"].device_id == laptop_id
         assert hosts["172.26.71.30"].device_id is None and hosts["172.26.71.30"].name == "HP-PRINTER"
         site = session.get(Site, site_id)
         assert not any(sensor.is_new(h, site) for h in hosts.values())  # the baseline is never "new"
