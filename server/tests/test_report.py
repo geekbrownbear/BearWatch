@@ -113,6 +113,14 @@ def test_report_end_to_end(session, tmp_path):
         _sign_in(c)
         page = c.get(f"/clients/{client_id}/report?month={month:%Y-%m}")
         assert page.status_code == 200 and "Cyber insurance checklist" in page.text and "/static/report-logo.svg" in page.text
+        # The site's CSP blocks inline styles; the preview allows its own stylesheet by hash, and no style attributes.
+        import base64
+        import hashlib
+        import re
+        css = re.search(r"<style>(.*?)</style>", page.text, re.S).group(1)
+        digest = base64.b64encode(hashlib.sha256(css.encode()).digest()).decode()
+        assert f"style-src 'self' 'sha256-{digest}';" in page.headers["content-security-policy"]
+        assert 'style="' not in page.text
         assert c.get(f"/clients/{client_id}/report?month=junk").status_code == 400
         assert c.get("/clients/999/report").status_code == 404
         assert "Monthly report" in c.get(f"/clients/{client_id}").text

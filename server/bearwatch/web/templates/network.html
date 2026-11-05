@@ -68,7 +68,7 @@
       <td class="mono">{{ h.ip }}</td>
       <td class="mono">{{ h.mac or "" }}</td>
       <td>{{ h.vendor or "" }}</td>
-      <td><span class="mono">{% for p in h.ports %}<span title="{{ p.banner or '' }}">{{ p.port }}{% if p.service and p.service != "unknown" %} {{ p.service }}{% endif %}</span>{% if not loop.last %}, {% endif %}{% endfor %}</span>
+      <td><span class="mono">{% for p in h.ports %}<span title="{{ p.banner or '' }}">{{ p.port }}{% if p.service and p.service != "unknown" %} {{ p.service }}{% endif %}{% if p.ip and p.ip != h.ip %} on {{ p.ip }}{% endif %}</span>{% if not loop.last %}, {% endif %}{% endfor %}</span>
         {% if r.notes %}<br><span class="muted">{{ r.notes | join("; ") }}</span>{% endif %}</td>
       <td class="num">{% if r.issues %}<span class="bad">{{ r.issues }}</span>{% else %}0{% endif %}</td>
       <td>{{ ago(h.first_seen) }}</td>
