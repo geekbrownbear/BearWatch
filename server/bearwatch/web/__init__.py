@@ -13,13 +13,13 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import String, and_, case, cast, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import __version__, auth, posture, scoring, sensor, tenants
+from .. import __version__, auth, lifecycle, posture, report, scoring, sensor, tenants
 from ..config import get_settings
 from ..db import session_scope
 from ..intel.common import utcnow
@@ -297,7 +297,8 @@ def device_page(request: Request, device_id: int, user: str = Depends(auth.curre
         return render(request, "device.html", user, dev=dev, site=site, client=client, fixes=fixes, by_fix=by_fix, software=software,
                       wua=wua, cross=_cross_check(dev, open_findings, wua), events=events, why=why, excs=excs,
                       importance=scoring.importance(dev), settings=_settings(dev), net_hosts=net_hosts, net_issues=net_issues,
-                      is_sensor=site.sensor_device_id == dev.id, severity_of=sensor.severity)
+                      is_sensor=site.sensor_device_id == dev.id, severity_of=sensor.severity,
+                      support=lifecycle.support(dev.os_build, dev.os_caption, dev.is_server) if dev.os_build else None)
 
 
 def _settings(dev: Device) -> list[posture.Result] | None:
@@ -600,6 +601,53 @@ def toggle_known(request: Request, host_id: int, user: str = Depends(auth.curren
         h.known = not h.known
         site_id = h.site_id
     return RedirectResponse(f"/sites/{site_id}/network", 303)
+
+
+def _report_month(month: str | None) -> date:
+    if not month:
+        return report.previous_month()
+    try:
+        return datetime.strptime(month, "%Y-%m").date()
+    except ValueError:
+        raise HTTPException(400, "month must look like 2026-10") from None
+
+
+@router.get("/clients/{client_id}/report", response_class=HTMLResponse)
+def report_preview(request: Request, client_id: int, month: str | None = None, user: str = Depends(auth.current_user)):
+    with session_scope() as s:
+        s.get(Client, client_id) or _404()
+        r = report.build(s, client_id, _report_month(month))
+        html = report.render_html(r, screen=True, static="/static")
+        return HTMLResponse(html, headers={"Content-Security-Policy": _inline_style_csp(html)})
+
+
+def _inline_style_csp(html: str) -> str:
+    """The site's policy blocks inline styles. The report keeps its stylesheet inline, since
+    WeasyPrint renders the same page into the PDF, so the preview allows exactly that stylesheet
+    by its hash and nothing else."""
+    import base64
+    import hashlib
+
+    from ..api import SECURITY_HEADERS
+
+    hashes = [f"'sha256-{base64.b64encode(hashlib.sha256(m.encode()).digest()).decode()}'"
+              for m in re.findall(r"<style>(.*?)</style>", html, re.S)]
+    policy = SECURITY_HEADERS["Content-Security-Policy"]
+    assert "style-src 'self';" in policy
+    return policy.replace("style-src 'self';", f"style-src 'self' {' '.join(hashes)};")
+
+
+@router.get("/clients/{client_id}/report.pdf")
+def report_pdf(request: Request, client_id: int, month: str | None = None, user: str = Depends(auth.current_user)):
+    if not report.pdf_available():
+        raise HTTPException(503, "PDF rendering is not installed on this server (WeasyPrint); use the HTML preview")
+    with session_scope() as s:
+        client = s.get(Client, client_id) or _404()
+        r = report.build(s, client_id, _report_month(month))
+        pdf = report.render_pdf(r)
+        name = re.sub(r"[^A-Za-z0-9]+", "-", client.name).strip("-") or "client"
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-security-report-{r.month:%Y-%m}.pdf"'})
 
 
 def _404():

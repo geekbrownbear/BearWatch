@@ -171,6 +171,27 @@ def cmd_site(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    from datetime import datetime as _dt
+
+    from . import report
+
+    month = _dt.strptime(args.month, "%Y-%m").date() if args.month else report.previous_month()
+    with session_scope() as s:
+        r = report.build(s, args.client_id, month)
+        if args.html:
+            data = report.render_html(r).encode()
+        else:
+            if not report.pdf_available():
+                print("WeasyPrint is not installed; use --html", file=sys.stderr)
+                return 2
+            data = report.render_pdf(r)
+    with open(args.out, "wb") as f:
+        f.write(data)
+    print(f"{r.client.name} {r.month:%Y-%m}: grade {r.grade} ({r.score}), wrote {args.out}")
+    return 0
+
+
 def cmd_evaluate(args) -> int:
     with session_scope() as s:
         if args.all:
@@ -235,6 +256,12 @@ def main(argv: list[str] | None = None) -> int:
     a = sp.add_parser("rotate-key")
     a.add_argument("site_id", type=int)
 
+    p = sub.add_parser("report", help="write a client's monthly report")
+    p.add_argument("client_id", type=int)
+    p.add_argument("--month", help="YYYY-MM; default: last month")
+    p.add_argument("--out", required=True, help="output file")
+    p.add_argument("--html", action="store_true", help="write HTML instead of PDF")
+
     p = sub.add_parser("evaluate", help="recompute findings for devices that need it")
     p.add_argument("--all", action="store_true", help="re-evaluate every device")
 
@@ -253,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         "client": cmd_client,
         "site": cmd_site,
         "evaluate": cmd_evaluate,
+        "report": cmd_report,
     }
     return handlers[args.cmd](args)
 

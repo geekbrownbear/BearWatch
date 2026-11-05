@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ r.client.name }} security report, {{ month_name }}</title>
+<style>
+  @font-face { font-family: "Inter"; src: url("{{ static }}/inter-latin-wght.woff2") format("woff2"); font-weight: 100 900; }
+  @font-face { font-family: "Mozilla Text"; src: url("{{ static }}/mozilla-text-latin-wght.woff2") format("woff2"); font-weight: 200 700; }
+  :root {
+    /* Bearium palette on a light page. Cyan and lime fail contrast on white, so text uses the
+       brand's light-mode substitutes (cyan #0E6C8C, lime #3E7D15). Lime stays a fill only. */
+    --navy: #0B2545; --ink-2: #33475F; --ink-3: #5B7085; --ink-4: #8194A8;
+    --cyan-ink: #0E6C8C; --lime: #9DDF4B; --lime-ink: #3E7D15;
+    --bad: #B42318; --warn: #9A5B00; --rule: #C9DCE9; --rule-soft: #E7EEF6; --tint: #F4F7FB;
+  }
+  @page {
+    size: Letter; margin: 0.7in 0.6in 0.6in;
+    @bottom-left { content: "Bearium Networks · {{ r.client.name }} · {{ month_name }}"; font-family: Inter, sans-serif; font-size: 7.5pt; color: #8194A8; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-family: Inter, sans-serif; font-size: 7.5pt; color: #8194A8; }
+  }
+  html { background: #fff; }
+  body { font-family: Inter, "Helvetica Neue", Arial, sans-serif; font-size: 9.5pt; line-height: 1.5; color: var(--navy); margin: 0; }
+  .screen body, body.screen { max-width: 8.5in; margin: 24px auto; padding: 0 16px; }
+  h1, h2, h3 { font-family: "Mozilla Text", Inter, sans-serif; line-height: 1.2; margin: 0; }
+  h1 { font-size: 22pt; font-weight: 650; }
+  h2 { font-size: 13pt; font-weight: 650; margin: 18pt 0 6pt; break-after: avoid; }
+  p { margin: 0 0 6pt; }
+  .eyebrow { color: var(--cyan-ink); font-weight: 700; letter-spacing: 0.25em; text-transform: uppercase; font-size: 7.5pt; margin-bottom: 4pt; }
+  .muted { color: var(--ink-3); }
+  .small { font-size: 8.5pt; }
+  .contact { margin-top: 14pt; }
+  .head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid var(--lime); padding-bottom: 10pt; margin-bottom: 12pt; }
+  .head img { width: 1.6in; }
+  .grade-row { display: flex; gap: 14pt; align-items: stretch; margin: 6pt 0 4pt; }
+  .grade { width: 1.25in; border: 1px solid var(--rule); border-radius: 8pt; text-align: center; padding: 8pt 0; }
+  .grade .letter { font-family: "Mozilla Text", Inter, sans-serif; font-size: 40pt; font-weight: 700; line-height: 1; }
+  .grade .score { color: var(--ink-3); font-size: 8.5pt; }
+  .g-A, .g-B { color: var(--lime-ink); } .g-C { color: var(--warn); } .g-D, .g-F { color: var(--bad); }
+  .stats { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6pt; }
+  .stat { border: 1px solid var(--rule-soft); background: var(--tint); border-radius: 6pt; padding: 6pt 8pt; }
+  .stat .n { font-family: "Mozilla Text", Inter, sans-serif; font-size: 15pt; font-weight: 650; }
+  .stat .l { color: var(--ink-3); font-size: 7.5pt; }
+  .bad { color: var(--bad); } .warn { color: var(--warn); } .good { color: var(--lime-ink); }
+  table { width: 100%; border-collapse: collapse; margin: 2pt 0 4pt; }
+  th { text-align: left; font-size: 7.5pt; color: var(--ink-3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--rule); padding: 3pt 5pt; }
+  td { border-bottom: 1px solid var(--rule-soft); padding: 4pt 5pt; vertical-align: top; }
+  tr { break-inside: avoid; }
+  .num { text-align: right; white-space: nowrap; }
+  .pill { display: inline-block; border-radius: 99pt; padding: 0 6pt; font-size: 7.5pt; font-weight: 700; border: 1px solid currentColor; white-space: nowrap; }
+  .check td:first-child { width: 0.5in; }
+  .chart { margin: 4pt 0; }
+  .note { border-left: 3px solid var(--rule); padding: 2pt 0 2pt 8pt; color: var(--ink-2); }
+  .cols { display: flex; gap: 14pt; } .cols > div { flex: 1; }
+</style>
+</head>
+<body{% if screen %} class="screen"{% endif %}>
+
+<div class="head">
+  <div>
+    <div class="eyebrow">Monthly security report</div>
+    <h1>{{ r.client.name }}</h1>
+    <p class="muted">{{ month_name }} · Prepared {{ fmt_date(r.generated) }} by Bearium Networks</p>
+  </div>
+  <img src="{{ static }}/report-logo.svg" alt="Bearium Networks">
+</div>
+
+<div class="grade-row">
+  <div class="grade">
+    <div class="letter g-{{ r.grade }}">{{ r.grade }}</div>
+    <div class="score">{{ r.score }} out of 100</div>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="n">{{ r.devices }}</div><div class="l">PCs and servers watched</div></div>
+    <div class="stat"><div class="n">{{ r.fixed }}</div><div class="l">Problems fixed in {{ month_short }}</div></div>
+    <div class="stat"><div class="n">{% if r.on_time_rate is not none %}{{ r.on_time_rate }}%{% else %}None due{% endif %}</div><div class="l">Fixed on time</div></div>
+    <div class="stat"><div class="n {% if r.exploited_fixes %}bad{% endif %}">{{ r.exploited_fixes }}</div><div class="l">Updates for attacks in the wild</div></div>
+    <div class="stat"><div class="n {% if r.overdue_fixes %}warn{% endif %}">{{ r.overdue_fixes }}</div><div class="l">Updates past their deadline</div></div>
+    <div class="stat"><div class="n">{{ r.open_fixes }}</div><div class="l">Updates and changes to do</div></div>
+  </div>
+</div>
+
+{% if r.deductions %}
+<p class="note"><strong>How the grade was set.</strong> It starts at 100.
+  {% for pts, text in r.deductions %}{{ text }}: minus {{ pts }}.{% if not loop.last %} {% endif %}{% endfor %}</p>
+{% else %}
+<p class="note"><strong>How the grade was set.</strong> It starts at 100. Nothing took points off this month.</p>
+{% endif %}
+
+<h2>Progress over six months</h2>
+<p class="muted small">Lime bars are problems fixed each month, gray bars are new problems found, and the line is how many were open at the end of the month.</p>
+{% set maxv = [1] + r.trend | map(attribute="found") | list + r.trend | map(attribute="fixed") | list + r.trend | map(attribute="open") | list %}
+{% set top = maxv | max %}
+<svg class="chart" width="100%" viewBox="0 0 600 150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Problems found, fixed and open by month">
+  <line x1="40" y1="120" x2="590" y2="120" stroke="#C9DCE9" stroke-width="1"/>
+  {% for t in r.trend %}
+    {% set x = 50 + loop.index0 * 90 %}
+    {% set hf = (t.found / top * 100) | round(1) %}{% set hx = (t.fixed / top * 100) | round(1) %}
+    <rect x="{{ x }}" y="{{ 120 - hf }}" width="26" height="{{ hf }}" fill="#C9D3DE"/>
+    <rect x="{{ x + 30 }}" y="{{ 120 - hx }}" width="26" height="{{ hx }}" fill="#9DDF4B"/>
+    <text x="{{ x + 28 }}" y="136" font-size="10" text-anchor="middle" fill="#5B7085" font-family="Inter, sans-serif">{{ t.month.strftime("%b") }}</text>
+    <text x="{{ x + 13 }}" y="{{ 116 - hf }}" font-size="8" text-anchor="middle" fill="#5B7085" font-family="Inter, sans-serif">{{ t.found }}</text>
+    <text x="{{ x + 43 }}" y="{{ 116 - hx }}" font-size="8" text-anchor="middle" fill="#3E7D15" font-family="Inter, sans-serif">{{ t.fixed }}</text>
+  {% endfor %}
+  <polyline fill="none" stroke="#0B2545" stroke-width="2" points="{% for t in r.trend %}{{ 78 + loop.index0 * 90 }},{{ (120 - t.open / top * 100) | round(1) }} {% endfor %}"/>
+  {% for t in r.trend %}<circle cx="{{ 78 + loop.index0 * 90 }}" cy="{{ (120 - t.open / top * 100) | round(1) }}" r="3" fill="#0B2545"/>{% endfor %}
+</svg>
+
+<h2>The five most important things to do</h2>
+{% if r.top_fixes %}
+<table>
+  <thead><tr><th>What to do</th><th class="num">PCs</th><th class="num">Problems it fixes</th><th>Why it matters</th></tr></thead>
+  <tbody>
+  {% for f in r.top_fixes %}
+    <tr>
+      <td><strong>{{ f.label }}</strong>{% if f.overdue %} <span class="pill warn">Past deadline</span>{% endif %}</td>
+      <td class="num">{{ f.devices }}</td>
+      <td class="num">{{ f.cves if f.source != "posture" else "1 setting" }}</td>
+      <td>{% if f.tier == 1 %}<span class="bad">Attackers are using this now.</span>{% elif f.tier == 2 %}Public attack code exists.{% elif f.source == "posture" %}A risky Windows setting.{% else %}Fixes known security holes.{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>{{ r.fixes_note }}</p>
+{% endif %}
+
+<h2>Cyber insurance checklist</h2>
+<p class="muted small">Insurers ask about these on most applications and renewals. Each answer comes from what BearWatch measured on your PCs and network.</p>
+<table class="check">
+  <tbody>
+  {% for c in r.checklist %}
+    <tr>
+      <td>{% if c.status == "pass" %}<span class="pill good">Yes</span>{% elif c.status == "fail" %}<span class="pill bad">No</span>{% else %}<span class="pill muted">Not yet</span>{% endif %}</td>
+      <td><strong>{{ c.title }}</strong><br><span class="muted">{{ c.detail }}</span></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Windows versions</h2>
+<table>
+  <thead><tr><th>Version</th><th>Support</th><th class="num">PCs</th></tr></thead>
+  <tbody>
+  {% for v in r.windows %}
+    <tr>
+      <td><strong>{{ v.name }}</strong></td>
+      <td>{% if v.status == "ended" %}<span class="bad">{{ v.label }}</span>{% elif v.status == "ending" %}<span class="warn">{{ v.label }}</span>{% else %}{{ v.label }}{% endif %}</td>
+      <td class="num">{{ v.devices | length }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="3" class="muted">No PCs report to BearWatch yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div class="cols">
+<div>
+<h2>Risky Windows settings</h2>
+{% if r.settings %}
+<table>
+  <thead><tr><th>Setting</th><th class="num">PCs</th></tr></thead>
+  <tbody>{% for x in r.settings[:8] %}<tr><td>{{ x.title }}</td><td class="num">{{ x.devices }}</td></tr>{% endfor %}</tbody>
+</table>
+{% elif r.devices and r.settings_checked == r.devices %}<p>Every PC passes the settings checks.</p>
+{% elif r.settings_checked %}<p>No problems found on the {{ r.settings_checked }} PCs checked. {{ r.devices - r.settings_checked }} not checked yet.</p>
+{% else %}<p class="muted">Not checked yet. The agents on these PCs need an update first.</p>{% endif %}
+</div>
+<div>
+<h2>Your office network</h2>
+{% if r.network.sensor %}
+<table>
+  <tbody>
+    <tr><td>Devices seen in the last 30 days</td><td class="num">{{ r.network.hosts }}</td></tr>
+    <tr><td>Devices BearWatch does not watch</td><td class="num">{{ r.network.unmanaged }}</td></tr>
+    <tr><td>New devices this week</td><td class="num">{{ r.network.new }}</td></tr>
+    <tr><td>Unsafe services found</td><td class="num {% if r.network_issues %}bad{% endif %}">{{ r.network_issues | length }}</td></tr>
+  </tbody>
+</table>
+{% else %}<p class="muted">Network scanning is not set up for this office yet. Ask your technician about adding it.</p>{% endif %}
+</div>
+</div>
+
+{% if r.network_issues %}
+<h2>Unsafe services on the network</h2>
+<table>
+  <thead><tr><th>Problem</th><th>Device</th><th>How to fix it</th></tr></thead>
+  <tbody>{% for i in r.network_issues[:10] %}
+    <tr><td><strong>{{ i.title }}</strong><br><span class="muted">{{ i.severity | capitalize }}</span></td><td>{{ i.host }}<br><span class="muted">{{ i.ip }} port {{ i.port }}</span></td><td>{{ i.solution or "" }}</td></tr>
+  {% endfor %}</tbody>
+</table>
+{% endif %}
+
+<p class="muted small contact">Questions about this report? Call (407) 917-1321 or email support@bearium.net.</p>
+</body>
+</html>
