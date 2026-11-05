@@ -259,7 +259,9 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
         return CheckItem(title, "pass", ok)
 
     # Seen from the internet (external.py).
-    targets = s.scalars(select(ExternalTarget).where(ExternalTarget.client_id == client_id, ExternalTarget.last_checked_at.is_not(None))).all()
+    # Every listed target counts. One that has never been checked successfully, or whose last
+    # check failed, is unverified: it can fail an item but never let it pass.
+    targets = s.scalars(select(ExternalTarget).where(ExternalTarget.client_id == client_id)).all()
     t_ids = [t.id for t in targets]
     ext_open = {(i.target_id, i.check_id) for i in s.scalars(select(ExternalIssue).where(ExternalIssue.target_id.in_(t_ids),
                                                                                         ExternalIssue.status == "open"))} if t_ids else set()
@@ -268,7 +270,18 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     remote_ports = {"port-3389", "port-445", "port-23", "port-5900", "port-135", "port-139"}
     exposed = sorted({t.value for t in ips if any((t.id, c) in ext_open for c in remote_ports)})
     spoofable = sorted({t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-allows-all", "dmarc-missing"))})
+    unverified_ips = [t.value for t in ips if t.snapshot is None or t.last_error]
+    unverified_domains = [t.value for t in domains if t.snapshot is None or t.last_error]
     r.external = {"ips": len(ips), "domains": len(domains), "exposed": exposed, "spoofable": spoofable}
+
+    def ext_item(title: str, items: list, bad: list[str], unverified: list[str], bad_text: str, ok_text: str, none_text: str) -> CheckItem:
+        if bad:
+            return CheckItem(title, "fail", bad_text.format(", ".join(bad)))
+        if not items:
+            return CheckItem(title, "unknown", none_text)
+        if unverified:
+            return CheckItem(title, "unknown", f"Not checked yet: {', '.join(unverified)}.")
+        return CheckItem(title, "pass", ok_text)
 
     known_late = any(g.get("exploited_late") for g in fixes.values())
     r.checklist = [
@@ -291,14 +304,10 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
         CheckItem("Every PC is monitored", "fail" if r.silent else ("pass" if ids else "unknown"),
                   f"{plural(len(r.silent), 'PC')} {'has' if len(r.silent) == 1 else 'have'} not checked in for a day." if r.silent
                   else "Every PC checked in within the last day." if ids else "No PCs report to BearWatch yet."),
-        CheckItem("Remote access and file sharing are closed to the internet",
-                  ("fail" if exposed else "pass") if ips else "unknown",
-                  (f"Open on {', '.join(exposed)}." if exposed else f"Closed on {plural(len(ips), 'public address')}.")
-                  if ips else "No public addresses listed for this client yet."),
-        CheckItem("Email is protected from spoofing (SPF and DMARC)",
-                  ("fail" if spoofable else "pass") if domains else "unknown",
-                  (f"Missing for {', '.join(spoofable)}." if spoofable else f"Set up for {plural(len(domains), 'domain')}.")
-                  if domains else "No email domains listed for this client yet."),
+        ext_item("Remote access and file sharing are closed to the internet", ips, exposed, unverified_ips,
+                 "Open on {}.", f"Closed on {plural(len(ips), 'public address')}.", "No public addresses listed for this client yet."),
+        ext_item("Email is protected from spoofing (SPF and DMARC)", domains, spoofable, unverified_domains,
+                 "Missing for {}.", f"Set up for {plural(len(domains), 'domain')}.", "No email domains listed for this client yet."),
         CheckItem("No unsafe services on the office network",
                   "fail" if serious_net else ("unknown" if unscanned or not sites else "pass"),
                   f"{plural(serious_net, 'serious issue')} found." if serious_net

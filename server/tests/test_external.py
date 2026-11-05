@@ -94,7 +94,8 @@ def test_checks_and_issue_lifecycle(session):
     with db.session_scope() as s:
         checks = {i.title: i for i in report.build(s, client_id, date(2026, 10, 1)).checklist}
     assert checks["Remote access and file sharing are closed to the internet"].status == "fail"
-    assert checks["Email is protected from spoofing (SPF and DMARC)"].status == "pass"
+    # Its last DNS check failed, so email protection is unverified: "not yet", never "yes".
+    assert checks["Email is protected from spoofing (SPF and DMARC)"].status == "unknown"
 
 
 @respx.mock
@@ -139,3 +140,42 @@ def test_pages_and_cli(session, capsys):
         checks = {i.title: i for i in report.build(s, client_id, date(2026, 10, 1)).checklist}
     assert checks["Remote access and file sharing are closed to the internet"].status == "unknown"
     assert checks["Email is protected from spoofing (SPF and DMARC)"].status == "unknown"
+
+
+@respx.mock
+def test_failed_measurements_are_not_fixes(session):
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "Lab")
+        dom = ExternalTarget(client_id=c.id, kind="domain", value="example.com", created_at=utcnow())
+        ip = ExternalTarget(client_id=c.id, kind="ip", value=IP, created_at=utcnow())
+        s.add_all([dom, ip])
+        s.flush()
+        client_id = c.id
+        respx.get(external.DOH).mock(side_effect=_doh(spf="v=spf1 +all"))
+        with httpx.Client() as http:
+            external.check(s, dom, http, cert_days_left=lambda d: 3)
+        assert {i.check_id for i in s.scalars(select(ExternalIssue))} == {"spf-allows-all", "cert-expiring"}
+
+        # SERVFAIL comes back as HTTP 200: a failed lookup, not "no SPF". Nothing changes.
+        respx.get(external.DOH).mock(return_value=httpx.Response(200, json={"Status": 2, "AD": False}))
+        with httpx.Client() as http:
+            external.check(s, dom, http, cert_days_left=lambda d: 3)
+        assert "status 2" in dom.last_error
+        assert {(i.check_id, i.status) for i in s.scalars(select(ExternalIssue))} == {("spf-allows-all", "open"), ("cert-expiring", "open")}
+
+        # DNS works again but the TLS connection fails: the certificate issue stays open.
+        respx.get(external.DOH).mock(side_effect=_doh())
+        with httpx.Client() as http:
+            external.check(s, dom, http, cert_days_left=lambda d: None)
+        states = {i.check_id: i.status for i in s.scalars(select(ExternalIssue))}
+        assert states == {"spf-allows-all": "fixed", "cert-expiring": "open"} and dom.snapshot["cert_days_left"] == 3
+
+        # A target whose first check failed can't let an item pass.
+        respx.get(f"https://internetdb.shodan.io/{IP}").mock(return_value=httpx.Response(500))
+        with httpx.Client() as http:
+            external.check(s, ip, http)
+        assert ip.snapshot is None and ip.last_error
+        checks = {i.title: i for i in report.build(s, client_id, date(2026, 10, 1)).checklist}
+    assert checks["Remote access and file sharing are closed to the internet"].status == "unknown"
+    assert checks["Remote access and file sharing are closed to the internet"].detail == f"Not checked yet: {IP}."
+    assert checks["Email is protected from spoofing (SPF and DMARC)"].status == "pass"

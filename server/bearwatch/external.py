@@ -118,6 +118,11 @@ def _txt(http: httpx.Client, name: str) -> tuple[list[str], bool]:
     if r.status_code != 200:
         raise RuntimeError(f"DNS lookup for {name} answered HTTP {r.status_code}")
     body = r.json()
+    # 0 is an answer; 3 (NXDOMAIN) means the name has no records, which is an answer too (a
+    # domain with no _dmarc record). Anything else (SERVFAIL, REFUSED) is a failed lookup, and
+    # must not be read as "no SPF".
+    if body.get("Status") not in (0, 3):
+        raise RuntimeError(f"DNS lookup for {name} failed (status {body.get('Status')})")
     out = [a.get("data", "").replace('" "', "").strip('"') for a in body.get("Answer") or [] if a.get("type") == 16]
     return out, bool(body.get("AD"))
 
@@ -182,6 +187,7 @@ def due(s: Session, now: datetime | None = None) -> list[ExternalTarget]:
 def check(s: Session, t: ExternalTarget, http: httpx.Client, cert_days_left=None, now: datetime | None = None) -> None:
     now = now or utcnow()
     t.last_checked_at = now
+    inconclusive: set[str] = set()
     try:
         if t.kind == "ip":
             kev = set(s.scalars(select(Kev.cve_id)))
@@ -192,6 +198,11 @@ def check(s: Session, t: ExternalTarget, http: httpx.Client, cert_days_left=None
             snap["first_seen"] = {p: v for p, v in first.items() if int(p) in snap["ports"]}
         else:
             snap, found = check_domain(http, t.value, cert_days_left)
+            if snap["cert_days_left"] is None:
+                # No certificate read this time (timeout, handshake failure, no site). That is not
+                # a renewal: keep any certificate issue as it was, and the last known days left.
+                inconclusive = {"cert-expired", "cert-expiring"}
+                snap["cert_days_left"] = (t.snapshot or {}).get("cert_days_left")
     except (httpx.HTTPError, RuntimeError, ValueError, KeyError) as e:
         t.last_error = str(e)[:500]  # issues stay as they were: no answer is not a fix
         log.warning("external check of %s failed: %s", t.value, e)
@@ -212,7 +223,7 @@ def check(s: Session, t: ExternalTarget, http: httpx.Client, cert_days_left=None
         row.title, row.severity, row.detail, row.solution = f.title, f.severity, f.detail, f.solution
         row.status, row.last_seen, row.fixed_at = "open", now, None
     for key, row in rows.items():
-        if key not in seen and row.status == "open":
+        if key not in seen and row.status == "open" and key not in inconclusive:
             row.status, row.fixed_at = "fixed", now
     s.flush()
 
