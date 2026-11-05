@@ -26,7 +26,7 @@ from .models import SyncState
 
 log = logging.getLogger("bearwatch.worker")
 DEVICE_TICK = 30
-HALO_TICK = 900  # HaloPSA tickets, after device evaluation (docs/halo.md)
+HALO_TICK = 900  # HaloPSA tickets, on their own thread (docs/halo.md)
 EXTERNAL_TICK = 3600  # look for public addresses and domains due their weekly check (docs/external.md)
 FEED_TICK = 300
 ERROR_BACKOFF = timedelta(minutes=30)
@@ -120,24 +120,41 @@ def start_external(stop: threading.Event, tick: float = EXTERNAL_TICK) -> thread
     return t
 
 
+def halo_loop(stop: threading.Event, tick: float = HALO_TICK) -> None:
+    """Ticket syncs on their own thread: a slow or unreachable Halo (30 s per timed-out call)
+    must never hold up device evaluation."""
+    while not stop.is_set():
+        try:
+            run_halo()
+        except Exception:
+            log.exception("halo loop failed")
+        stop.wait(tick)
+
+
+def start_halo(stop: threading.Event, tick: float = HALO_TICK) -> threading.Thread:
+    t = threading.Thread(target=halo_loop, args=(stop, tick), name="halo", daemon=True)
+    t.start()
+    return t
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     init_db()
     log.info("worker started, jobs: %s", ", ".join(JOBS))
     feeds = start_feeds(threading.Event())
     ext = start_external(threading.Event())
-    last_halo = 0.0
+    tickets = start_halo(threading.Event())
     while True:
         try:
             run_devices()
         except Exception:
             log.exception("device evaluation loop failed")
-        if time.monotonic() - last_halo >= HALO_TICK:
-            last_halo = time.monotonic()
-            run_halo()
         if not ext.is_alive():
             log.error("external check thread stopped; restarting it")
             ext = start_external(threading.Event())
+        if not tickets.is_alive():
+            log.error("halo thread stopped; restarting it")
+            tickets = start_halo(threading.Event())
         if not feeds.is_alive():  # feeds_loop catches everything, so this should never happen
             log.error("feed thread stopped; restarting it")
             feeds = start_feeds(threading.Event())

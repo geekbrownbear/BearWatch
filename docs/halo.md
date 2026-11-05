@@ -16,7 +16,7 @@ update or one settings change, the same rows as the dashboard.
   BearWatch notices at its next update and opens a new ticket.
 - **A fix that comes back** gets a new ticket.
 
-The worker runs this every 15 minutes, right after it evaluates devices. A failed call is
+The worker runs this every 15 minutes on its own thread, so a slow Halo never holds up device evaluation. A failed call is
 recorded on that ticket's row and retried next time; it doesn't stop the other tickets. The
 overview's data table shows the last run as "HALO".
 
