@@ -180,6 +180,11 @@ def test_exploited_and_overdue_must_be_the_same_finding(session):
         s.flush()
         rep = report.build(s, c.id, date(2026, 10, 1), now=now)
         item = next(i for i in rep.checklist if i.title.startswith("Known exploited"))
+        assert item.status == "unknown"  # neither PC has been evaluated yet
+        for d in devs:
+            d.last_match_at = now
+        s.flush()
+        item = next(i for i in report.build(s, c.id, date(2026, 10, 1), now=now).checklist if i.title.startswith("Known exploited"))
     assert item.status == "pass"
 
 

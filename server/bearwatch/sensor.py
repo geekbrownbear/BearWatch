@@ -163,7 +163,12 @@ def store(s: Session, site: Site, rep: Report) -> int:
         row.name = best_name(h.names)
         row.ports = [p.model_dump() for p in sorted(h.ports, key=lambda p: p.port)]
         row.last_seen = now
-        row.device_id = match_device(row, by_mac, by_name)
+        matched = match_device(row, by_mac, by_name)
+        if matched is None and row.mac and row.device_id is not None:
+            # Same hardware address, and nothing in this scan points elsewhere (a failed name
+            # lookup is not evidence): keep the PC it was already linked to.
+            matched = row.device_id
+        row.device_id = matched
         s.flush()
         _issues(s, row, h.issues, now, set(h.unchecked_ports))
     site.sensor_scan_at = now
