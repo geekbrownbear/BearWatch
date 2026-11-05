@@ -200,8 +200,38 @@ def test_new_sensor_resets_the_baseline(session):
         assert not sensor.is_new(hosts["10.1.0.9"], site)
 
 
+def test_real_agent_scan_and_notes(session):
+    """A scan shaped exactly like agent 0.3.0's (lab VLAN): score-0 checks are notes, not issues."""
+    rdp = {"id": "PIS-0010", "port": 3389, "title": "Remote Desktop (RDP) reachable", "cvss": 0.0, "evidence": "port open", "solution": None}
+    ver = {"id": "PIS-0012", "port": 22, "title": "Software version detected", "cvss": 0.0, "evidence": "OpenSSH 10.0p2", "solution": None}
+    redis = {"id": "PIS-0003", "port": 6379, "title": "Redis database accessible without authentication", "cvss": 9.3,
+             "evidence": "INFO command answered without a password.", "solution": "Set requirepass."}
+    body = _scan(
+        {**_host("172.26.71.221", SENSOR_MAC, "W11-DEV01", ports=[22, 3389]), "issues": [rdp, ver], "rtt_ms": None,
+         "vendor": "Proxmox Server Solutions GmbH"},
+        {**_host("172.26.71.244", "02:97:e4:eb:35:ac", ports=[22, 6379]), "issues": [redis, ver], "vendor": "Private (randomized) address"},
+    )
+    body["hosts"][0]["ports"][0]["service"] = "unknown"
+    with db.session_scope() as s:
+        client = tenants.create_client(s, "Lab")
+        site, _ = tenants.create_site(s, client, "Office")
+        sensor.store(s, site, sensor.Report.model_validate(body))
+        site_id = site.id
+    from bearwatch.web import network_counts
+
+    with db.session_scope() as s:
+        assert network_counts(s, site_id=site_id)["net_issues"] == 1  # Redis only
+    with TestClient(app) as c:
+        _sign_in(c)
+        page = c.get(f"/sites/{site_id}/network").text
+        assert "Redis database accessible without authentication" in page
+        assert "Remote Desktop (RDP) reachable" in page  # shown as a note on the host row
+        assert "22 unknown" not in page
+
+
 def test_severity_and_silence():
-    assert [sensor.severity(x) for x in (9.3, 7.0, 5.1, 2.0, None)] == ["critical", "high", "medium", "low", "medium"]
+    assert [sensor.severity(x) for x in (9.3, 7.0, 5.1, 2.0, None, 0.0)] == ["critical", "high", "medium", "low", "medium", "info"]
+    assert not sensor.is_issue(0.0) and sensor.is_issue(None) and sensor.is_issue(2.1)
     site = Site(sensor_device_id=None, sensor_scan_at=None)
     assert not sensor.sensor_silent(site, 240)
     site.sensor_device_id = 1

@@ -20,6 +20,8 @@ site scans its own network every few hours and reports what it finds.
   list), with banners. Fourteen checks from Proton look for unsafe settings that have no CVE
   number, like a Redis or MongoDB that takes commands without a password, anonymous FTP, or
   Telnet. Each problem is a network issue with a severity from its CVSS score and a fix.
+  Checks scored 0 ("Remote Desktop reachable", "Software version detected") are notes: they
+  show on the host's row but are never counted as issues or put in the client report.
 
 The scan is non-destructive. It only reads what a device shows to anyone who connects, or tries
 the documented anonymous or guest access (FTP `anonymous`, MQTT with no credentials). Nothing is

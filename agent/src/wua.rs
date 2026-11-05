@@ -34,7 +34,8 @@ pub struct WuaResult {
     pub missing: Vec<WuaEntry>,
 }
 
-fn now_rfc3339() -> String {
+/// Now as RFC 3339 UTC, e.g. 2026-11-05T09:00:00Z. Also used for the sensor payload.
+pub fn now_rfc3339() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
