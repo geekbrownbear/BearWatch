@@ -23,7 +23,8 @@ Needs Docker with Compose.
 ```bash
 cp .env.example .env   # then set POSTGRES_PASSWORD and BEARWATCH_API_TOKEN
 docker compose up -d --build
-docker compose logs -f worker   # first full NVD sync: ~75 min (once; later runs take seconds)
+docker compose logs -f worker   # first full NVD sync: ~75 min (once; later runs take seconds).
+                                # PCs enrolled meanwhile are still evaluated within 30 s.
 ```
 
 The dashboard and API listen on `http://127.0.0.1:8080`; locally, sign in with
