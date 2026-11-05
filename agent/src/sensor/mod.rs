@@ -61,6 +61,8 @@ const LEN_BANNER: usize = 300;
 const LEN_TITLE: usize = 200;
 const LEN_EVIDENCE: usize = 500;
 const LEN_SOLUTION: usize = 1000;
+/// The server refuses a body over 8 MiB once unzipped. Stay under 7 MiB of JSON.
+const MAX_JSON: usize = 7 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Payload (POST /api/agent/sensor). Field names are the server contract.
@@ -392,6 +394,10 @@ pub fn scan() -> Payload {
         hosts: hosts.into_iter().map(|(_, h)| h).collect(),
     };
     limit(&mut payload);
+    let dropped = fit_size(&mut payload, MAX_JSON);
+    if dropped > 0 {
+        log(&format!("sensor report too large for one upload: left out {dropped} hosts, keeping the ones with findings"));
+    }
     let (ports, issues) = payload.hosts.iter().fold((0, 0), |(p, i), h| (p + h.ports.len(), i + h.issues.len()));
     log(&format!("sensor scan finished in {} s: {} hosts, {ports} open ports, {issues} findings", payload.duration_ms / 1000, payload.hosts.len()));
     payload
@@ -474,6 +480,42 @@ pub fn limit(p: &mut Payload) {
             fit(&mut i.solution, LEN_SOLUTION);
         }
     }
+}
+
+fn json_len<T: Serialize + ?Sized>(v: &T) -> usize {
+    serde_json::to_vec(v).map_or(usize::MAX, |b| b.len())
+}
+
+/// Every field is within its cap after `limit`, but a big network can still add up past what the
+/// server takes, and a refused upload loses the whole scan. Keep the JSON under `max`: drop
+/// banners first (context, not findings), then hosts, keeping those with findings. A host left
+/// out is simply not seen this time; the server keeps its issues as they were. Returns how many
+/// hosts were left out.
+pub fn fit_size(p: &mut Payload, max: usize) -> usize {
+    if json_len(p) <= max {
+        return 0;
+    }
+    for h in &mut p.hosts {
+        for port in &mut h.ports {
+            port.banner = None;
+        }
+    }
+    if json_len(p) <= max {
+        return 0;
+    }
+    let mut hosts = std::mem::take(&mut p.hosts);
+    hosts.sort_by_key(|h| h.issues.is_empty()); // stable: hosts with findings first
+    let total = hosts.len();
+    let mut used = json_len(p);
+    for h in hosts {
+        let n = json_len(&h) + 1; // and the comma before it
+        if used + n > max {
+            break;
+        }
+        used += n;
+        p.hosts.push(h);
+    }
+    total - p.hosts.len()
 }
 
 #[cfg(test)]
@@ -610,6 +652,37 @@ mod tests {
         assert_eq!(h.vendor.as_ref().unwrap().len(), LEN_NAME);
         assert_eq!(h.names.upnp.as_ref().unwrap().len(), LEN_NAME);
         assert_eq!(h.unchecked_ports, (1..=200).collect::<Vec<u16>>());
+    }
+
+    #[test]
+    fn fit_size_keeps_findings_under_the_budget() {
+        let plain = |i: u32| Host {
+            ip: format!("10.0.{}.{}", i / 256, i % 256),
+            ports: (1..=20).map(|p| Port { port: p, service: "unknown".into(), banner: Some("b".repeat(80)) }).collect(),
+            ..Default::default()
+        };
+        let mut hosts: Vec<Host> = (0..4000).map(plain).collect();
+        hosts[3999].issues.push(Issue { id: "PIS-0005".into(), port: 6379, title: "Redis".into(), cvss: 9.3, evidence: "e".into(), solution: "s".into() });
+        let payload = |hosts: Vec<Host>| Payload { agent_version: "0.3.0", started_at: String::new(), duration_ms: 0, networks: vec![], hosts };
+
+        // Under the budget: untouched.
+        let mut p = payload(hosts.clone());
+        let full = json_len(&p);
+        assert_eq!(fit_size(&mut p, full), 0);
+        assert!(p.hosts[0].ports[0].banner.is_some());
+
+        // Just over: banners go, every host stays.
+        let mut p = payload(hosts.clone());
+        assert_eq!(fit_size(&mut p, full - 1), 0);
+        assert_eq!(p.hosts.len(), 4000);
+        assert!(p.hosts.iter().all(|h| h.ports.iter().all(|port| port.banner.is_none())));
+
+        // Far over: hosts go, the one with a finding is kept, and the result fits.
+        let mut p = payload(hosts);
+        let dropped = fit_size(&mut p, 100_000);
+        assert!(dropped > 3000 && dropped + p.hosts.len() == 4000);
+        assert_eq!(p.hosts[0].issues[0].id, "PIS-0005");
+        assert!(json_len(&p) <= 100_000);
     }
 
     /// A check that could not finish puts its port in unchecked_ports; one that finished does not.
