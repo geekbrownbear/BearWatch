@@ -41,6 +41,9 @@ class Port(BaseModel):
     port: int = Field(ge=1, le=65535)
     service: str | None = Field(default=None, max_length=255)
     banner: str | None = Field(default=None, max_length=300)
+    # Set by the server, not the agent: the address the port answered on, when the host
+    # answered on more than one (see _merge).
+    ip: str | None = Field(default=None, max_length=64)
 
 
 class Issue(BaseModel):
@@ -145,28 +148,33 @@ def _merge(hosts: list[Host]) -> dict[str, Host]:
     """One host can answer on more than one address (two IPs on one adapter, or one host on two
     of the sensor's networks). What every address showed counts: ports, issues and unchecked
     ports are combined under the host's key, and a name or vendor from any address fills a gap.
-    A port left unchecked on any address keeps that port's issues open."""
-    out: dict[str, Host] = {}
+    A port left unchecked on any address keeps that port's issues open. Each port and issue
+    keeps the address it was found on, so a technician knows where to look."""
+    groups: dict[str, list[Host]] = {}
     for h in hosts:
-        key = host_key(h)
-        cur = out.get(key)
-        if cur is None:
-            out[key] = h.model_copy(deep=True)
+        groups.setdefault(host_key(h), []).append(h)
+    out: dict[str, Host] = {}
+    for key, same in groups.items():
+        cur = out[key] = same[0].model_copy(deep=True)
+        if len(same) == 1:
             continue
-        ports = {p.port: p for p in cur.ports}
-        for p in h.ports:
-            ports.setdefault(p.port, p)
-        cur.ports = list(ports.values())
-        issues = {(i.id, i.port): i for i in cur.issues}
-        for i in h.issues:
-            issues.setdefault((i.id, i.port), i)
+        ports: dict[tuple[int, str], Port] = {}
+        issues: dict[tuple[str, int, str], Issue] = {}
+        for h in same:
+            for p in h.ports:
+                ports.setdefault((p.port, h.ip), p.model_copy(update={"ip": h.ip}))
+            for i in h.issues:
+                evidence = f"On {h.ip}: {i.evidence}" if i.evidence else f"On {h.ip}."
+                issues.setdefault((i.id, i.port, h.ip), i.model_copy(update={"evidence": evidence[:500]}))
+        cur.ports = sorted(ports.values(), key=lambda p: (p.port, p.ip or ""))[:200]
         cur.issues = list(issues.values())
-        cur.unchecked_ports = sorted(set(cur.unchecked_ports) | set(h.unchecked_ports))
-        for f in ("dns", "netbios", "mdns", "upnp"):
-            if not getattr(cur.names, f) and getattr(h.names, f):
-                setattr(cur.names, f, getattr(h.names, f))
-        cur.vendor = cur.vendor or h.vendor
-        cur.workgroup = cur.workgroup or h.workgroup
+        for h in same[1:]:
+            cur.unchecked_ports = sorted(set(cur.unchecked_ports) | set(h.unchecked_ports))
+            for f in ("dns", "netbios", "mdns", "upnp"):
+                if not getattr(cur.names, f) and getattr(h.names, f):
+                    setattr(cur.names, f, getattr(h.names, f))
+            cur.vendor = cur.vendor or h.vendor
+            cur.workgroup = cur.workgroup or h.workgroup
     return out
 
 

@@ -244,6 +244,9 @@ def test_addresses_of_one_host_are_merged_and_shared_names_link_nothing(session)
         hosts = {h.key: h for h in s.scalars(select(NetworkHost))}
         assert sorted(p["port"] for p in hosts[f"mac:{PRINTER_MAC}"].ports) == [80, 6379]
         assert [(i.check_id, i.status) for i in s.scalars(select(NetworkIssue))] == [("PIS-0005", "open")]
+        # Each port and issue says which address it was found on.
+        assert {p["port"]: p["ip"] for p in hosts[f"mac:{PRINTER_MAC}"].ports} == {80: "10.0.0.5", 6379: "10.0.0.6"}
+        assert s.scalars(select(NetworkIssue)).one().evidence == "On 10.0.0.6: PING answered +PONG"
         # Two PCs of this client are called OFFICE-PC: the name links the host to neither.
         assert hosts[f"mac:{LAPTOP_MAC}"].device_id is None
 
