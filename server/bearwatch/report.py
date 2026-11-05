@@ -196,7 +196,7 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     }
     issues = s.execute(select(NetworkIssue, NetworkHost).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
                        .join(Site, Site.id == NetworkHost.site_id)
-                       .where(Site.client_id == client_id, NetworkIssue.status == "open")
+                       .where(Site.client_id == client_id, NetworkIssue.status == "open", sensor.issue_clause())
                        .order_by(NetworkIssue.cvss.desc().nulls_last())).all()
     r.network_issues = [{"title": i.title, "host": h.name or h.ip, "ip": h.ip, "port": i.port, "severity": sensor.severity(i.cvss),
                          "solution": i.solution} for i, h in issues]
