@@ -271,6 +271,9 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     remote_ports = {"port-3389", "port-445", "port-23", "port-5900", "port-135", "port-137", "port-139"}
     exposed = sorted({t.value for t in ips if any((t.id, c) in ext_open for c in remote_ports)})
     spoofable = sorted({t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-allows-all", "dmarc-missing"))})
+    # An SPF record that allows any server is a high issue, so it already costs points as a serious
+    # internet issue. The email item costs checklist points only for a domain missing SPF or DMARC.
+    spoof_unscored = [t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "dmarc-missing"))]
     unverified_ips = [t.value for t in ips if t.snapshot is None or t.last_error]
     unverified_domains = [t.value for t in domains if t.snapshot is None or t.last_error]
     r.external = {"ips": len(ips), "domains": len(domains), "exposed": exposed, "spoofable": spoofable}
@@ -341,7 +344,8 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     n = serious_net + serious_ext
     take("exposed", n, f"{plural(n, 'serious issue')} on the office network or open to the internet")
     fails = [c for c in r.checklist if c.status == "fail" and not c.title.startswith(
-        ("Every PC runs", "Every PC is", "Known exploited", "No unsafe services", "Remote access"))]
+        ("Every PC runs", "Every PC is", "Known exploited", "No unsafe services", "Remote access"))
+        and not (c.title.startswith("Email is protected") and not spoof_unscored)]
     take("checklist", len(fails), f"{plural(len(fails), 'insurance checklist item')} not met")
     n = len(r.silent)
     take("silent", n, f"{plural(n, 'PC')} not checking in")

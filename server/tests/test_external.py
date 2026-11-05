@@ -143,6 +143,43 @@ def test_pages_and_cli(session, capsys):
 
 
 @respx.mock
+def test_open_spf_costs_points_once(session):
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "Lab")
+        dom = ExternalTarget(client_id=c.id, kind="domain", value="example.com", created_at=utcnow())
+        s.add(dom)
+        s.flush()
+        respx.get(external.DOH).mock(side_effect=_doh(spf="v=spf1 +all"))
+        with httpx.Client() as http:
+            external.check(s, dom, http, cert_days_left=lambda d: 90)
+        r = report.build(s, c.id, date(2026, 10, 1))
+        assert [i.title for i in r.checklist if i.status == "fail"] == ["Email is protected from spoofing (SPF and DMARC)"]
+        assert [p for p, _ in r.deductions] == [10] and r.grade == "A"
+
+
+@respx.mock
+def test_lookups_happen_before_any_write(session):
+    """With SQLite, a write pending during a lookup holds the database's write lock for its length."""
+    with db.session_scope() as s:
+        s.add(Kev(cve_id="CVE-2019-0708", source="cisa", date_added=date(2019, 11, 3)))
+        c = tenants.create_client(s, "Lab")
+        s.add(ExternalTarget(client_id=c.id, kind="ip", value=IP, created_at=utcnow()))
+        s.add(ExternalTarget(client_id=c.id, kind="ip", value="8.8.8.8", created_at=utcnow()))
+    with db.session_scope() as s:
+        dirty = []
+
+        def handler(request):
+            dirty.append(bool(s.new or s.dirty))
+            return httpx.Response(200, json={"ip": request.url.path.strip("/"), "ports": [443], "vulns": [], "hostnames": [],
+                                             "tags": [], "cpes": []})
+
+        respx.get(url__regex=r"https://internetdb\.shodan\.io/.*").mock(side_effect=handler)
+        assert external.run_due(s) == 2
+        assert dirty == [False, False]
+        assert all(t.last_checked_at is not None for t in s.scalars(select(ExternalTarget)))
+
+
+@respx.mock
 def test_failed_measurements_are_not_fixes(session):
     with db.session_scope() as s:
         c = tenants.create_client(s, "Lab")

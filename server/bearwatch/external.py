@@ -185,12 +185,14 @@ def due(s: Session, now: datetime | None = None) -> list[ExternalTarget]:
 
 
 def check(s: Session, t: ExternalTarget, http: httpx.Client, cert_days_left=None, now: datetime | None = None) -> None:
+    """Measure first, then write. Nothing is changed in the session until the lookups are done:
+    with SQLite, a pending change would be flushed by the next query and hold the database's one
+    write lock through every slow lookup and TLS wait."""
     now = now or utcnow()
-    t.last_checked_at = now
     inconclusive: set[str] = set()
+    kev = set(s.scalars(select(Kev.cve_id))) if t.kind == "ip" else set()
     try:
         if t.kind == "ip":
-            kev = set(s.scalars(select(Kev.cve_id)))
             snap, found = check_ip(http, t.value, kev)
             first = dict((t.snapshot or {}).get("first_seen", {}))
             for p in snap["ports"]:
@@ -204,9 +206,11 @@ def check(s: Session, t: ExternalTarget, http: httpx.Client, cert_days_left=None
                 inconclusive = {"cert-expired", "cert-expiring"}
                 snap["cert_days_left"] = (t.snapshot or {}).get("cert_days_left")
     except (httpx.HTTPError, RuntimeError, ValueError, KeyError) as e:
+        t.last_checked_at = now
         t.last_error = str(e)[:500]  # issues stay as they were: no answer is not a fix
         log.warning("external check of %s failed: %s", t.value, e)
         return
+    t.last_checked_at = now
     if t.first_checked_at is None:
         t.first_checked_at = now
     t.snapshot, t.last_error = snap, None
@@ -237,6 +241,7 @@ def run_due(s: Session, http: httpx.Client | None = None) -> int:
     try:
         for t in targets:
             check(s, t, http)
+            s.commit()  # one short write per target, never one held across the next target's lookups
     finally:
         if own:
             http.close()
