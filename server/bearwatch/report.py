@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import and_, distinct, func, select
 from sqlalchemy.orm import Session
 
-from . import lifecycle, sensor
+from . import lifecycle, posture, scoring, sensor
 from .intel.common import utcnow
 from .models import Client, Device, Finding, FindingEvent, NetworkHost, NetworkIssue, Site
 
@@ -100,6 +100,19 @@ def _status_at(s: Session, device_ids: list[int], when: datetime) -> int:
     return sum(1 for ev in last.values() if ev in ("found", "reopened"))
 
 
+def _cycle_deadline(s: Session, finding_id: int, fixed_at: datetime) -> datetime:
+    """The deadline that applied to the fix at `fixed_at`: the start of that open cycle (its
+    found or reopened event) plus the fix window. A finding that reopens later gets a new
+    deadline, which must not rewrite how an older fix is judged."""
+    f = s.get(Finding, finding_id)
+    began = s.scalar(select(func.max(FindingEvent.at)).where(FindingEvent.finding_id == finding_id,
+                                                             FindingEvent.event.in_(("found", "reopened")),
+                                                             FindingEvent.at <= fixed_at))
+    began = began or (f.first_seen if f is not None else fixed_at)
+    tier, cvss = (f.exploit_tier, f.cvss) if f is not None else (4, None)
+    return began + timedelta(days=scoring.sla_days(tier, cvss))
+
+
 def build(s: Session, client_id: int, month: date, now: datetime | None = None) -> Report:
     now = now or utcnow()
     client = s.get(Client, client_id)
@@ -137,13 +150,12 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
 
     # The month: what was found and fixed, and how many fixes beat their deadline.
     if ids:
-        events = s.execute(select(FindingEvent.event, Finding.due_at, FindingEvent.at)
-                           .join(Finding, Finding.id == FindingEvent.finding_id)
+        events = s.execute(select(FindingEvent.event, FindingEvent.finding_id, FindingEvent.at)
                            .where(FindingEvent.device_id.in_(ids), FindingEvent.at >= start, FindingEvent.at < end)).all()
         r.found = sum(1 for ev, _, _ in events if ev in ("found", "reopened"))
-        fixed = [(due, at) for ev, due, at in events if ev == "fixed"]
+        fixed = [(fid, at) for ev, fid, at in events if ev == "fixed"]
         r.fixed = len(fixed)
-        r.fixed_on_time = sum(1 for due, at in fixed if due is None or at <= due)
+        r.fixed_on_time = sum(1 for fid, at in fixed if at <= _cycle_deadline(s, fid, at))
 
     # Six months of trend, ending with this one.
     m = start.date()
@@ -174,6 +186,7 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     order = {"ended": 0, "ending": 1, "unknown": 2, "supported": 3}
     r.windows = sorted(by_version.values(), key=lambda v: (order[v["status"]], v["name"]))
     unsupported = [h for v in r.windows if v["status"] == "ended" for h in v["devices"]]
+    unknown_support = [h for v in r.windows if v["status"] == "unknown" for h in v["devices"]]
 
     # Windows settings that fail, by how many PCs.
     if ids:
@@ -203,34 +216,52 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     serious_net = sum(1 for x in r.network_issues if x["severity"] in ("critical", "high"))
 
     # Insurance readiness: things insurers ask about, answered only from what BearWatch measured.
-    # A PC whose agent has not sent settings yet (before 0.2.0) is "not checked", never a pass.
-    checked = [d for d in devs if d.posture is not None]
-    checked_ws = [d for d in checked if not d.is_server]
+    # Each rule is judged on each PC's own values. A PC whose agent sent no settings, or that
+    # lacks a value the rule reads, is "not checked", so the item can't be a "Yes".
+    rs = posture.ruleset()
+    judged = {d.id: ({x.rule.id: x.status for x in posture.evaluate(rs, d.posture.get("values", {}), d.is_server,
+                                                                     posture.build_number(d.os_build))}
+                     if d.posture is not None else None) for d in devs}
 
-    def setting(rules: list[str], title: str, ok: str, bad: str, pool: list[Device] | None = None) -> CheckItem:
-        pool = checked if pool is None else pool
+    def setting(rules: list[str], title: str, ok: str, bad: str, workstations_only: bool = False) -> CheckItem:
         if not ids:
             return CheckItem(title, "unknown", "No PCs report to BearWatch yet.")
-        if not pool:
-            return CheckItem(title, "unknown", "Not checked yet. The agents on these PCs need an update first.")
-        n = max((failing.get(x, 0) for x in rules), default=0)
-        if n:
-            return CheckItem(title, "fail", bad.format(pcs=plural(n, "PC"), workstations=plural(n, "workstation"), verb="has" if n == 1 else "have"))
-        gap = len(devs if pool is checked else [d for d in devs if not d.is_server]) - len(pool)
-        return CheckItem(title, "pass", ok + (f" {plural(gap, 'PC')} not checked yet." if gap else ""))
+        pool = [d for d in devs if not (workstations_only and d.is_server)]
+        fails = unknown = passes = 0
+        for d in pool:
+            res = judged[d.id]
+            if res is None:
+                unknown += 1
+                continue
+            sts = [res[x] for x in rules if x in res]  # missing: the rule doesn't apply to this PC
+            if "fail" in sts:
+                fails += 1
+            elif "unknown" in sts or (not sts and not any(x in rs.by_id for x in rules)):
+                unknown += 1
+            else:
+                passes += 1
+        if fails:
+            return CheckItem(title, "fail", bad.format(pcs=plural(fails, "PC"), workstations=plural(fails, "workstation"),
+                                                       verb="has" if fails == 1 else "have"))
+        if unknown:
+            if not passes:
+                return CheckItem(title, "unknown", "Not checked yet. The agents on these PCs need an update first.")
+            return CheckItem(title, "unknown", f"Passes on {plural(passes, 'PC')}; {plural(unknown, 'PC')} not checked yet.")
+        return CheckItem(title, "pass", ok)
 
     known_late = any(g["overdue"] and g["tier"] == 1 for g in fixes.values())
     r.checklist = [
-        setting(["av-unhealthy"], "Antivirus is on and up to date", "On and up to date on every workstation checked.",
-                "Off or out of date on {workstations}.", pool=checked_ws),
-        setting(["firewall-off"], "Windows Firewall is on", "On for every network type on every PC checked.", "Off on {pcs}."),
-        setting(["rdp-without-nla"], "Remote Desktop requires sign-in first", "Every PC checked requires it, or has Remote Desktop off.",
+        setting(["av-unhealthy"], "Antivirus is on and up to date", "On and up to date on every workstation.",
+                "Off or out of date on {workstations}.", workstations_only=True),
+        setting(["firewall-off"], "Windows Firewall is on", "On for every network type on every PC.", "Off on {pcs}."),
+        setting(["rdp-without-nla"], "Remote Desktop requires sign-in first", "Every PC requires it, or has Remote Desktop off.",
                 "{pcs} accept Remote Desktop without it."),
-        setting(["smb1-server", "smb1-client"], "Old SMBv1 file sharing is off", "Off on every PC checked.", "Still on for {pcs}."),
-        setting(["laps-missing"], "Local admin passwords are unique and rotated", "Every PC checked uses LAPS.", "{pcs} {verb} no LAPS."),
+        setting(["smb1-server", "smb1-client"], "Old SMBv1 file sharing is off", "Off on every PC.", "Still on for {pcs}."),
+        setting(["laps-missing"], "Local admin passwords are unique and rotated", "Every PC uses LAPS.", "{pcs} {verb} no LAPS."),
         CheckItem("Every PC runs a supported Windows version",
-                  "fail" if unsupported else ("pass" if ids else "unknown"),
+                  "fail" if unsupported else ("unknown" if unknown_support or not ids else "pass"),
                   f"{plural(len(unsupported), 'PC')} no longer {'gets' if len(unsupported) == 1 else 'get'} security updates." if unsupported
+                  else f"Support dates are unknown for {plural(len(unknown_support), 'PC')}." if unknown_support
                   else "Every PC still gets security updates." if ids else "No PCs report to BearWatch yet."),
         CheckItem("Known exploited vulnerabilities are fixed within 14 days",
                   "fail" if known_late else ("pass" if ids else "unknown"),

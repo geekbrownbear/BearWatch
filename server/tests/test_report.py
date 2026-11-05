@@ -4,9 +4,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from bearwatch import db, findings, lifecycle, report, tenants
+from bearwatch import db, findings, lifecycle, posture, report, tenants
 from bearwatch.api import app
 from bearwatch.cli import main as cli
+from bearwatch.intel.common import utcnow
 from bearwatch.models import Client, Device, Finding, FindingEvent
 
 from .test_agent import _inventory, _post_inv, _seed
@@ -53,8 +54,12 @@ def test_report_end_to_end(session, tmp_path):
             # Backdate one fix into last month, finished after its deadline, so the month has history.
             f = s.scalars(select(Finding)).first()
             month = report.previous_month()
+            # Found on the 1st, known exploited (14 days), fixed on the 20th: late. It is open again
+            # now with a fresh deadline, which must not make that old fix look on time.
+            s.add(FindingEvent(finding_id=f.id, device_id=dev.id, event="found", at=datetime(month.year, month.month, 1)))
             s.add(FindingEvent(finding_id=f.id, device_id=dev.id, event="fixed", at=datetime(month.year, month.month, 20)))
-            f.due_at = datetime(month.year, month.month, 10)
+            f.exploit_tier = 1
+            f.due_at = utcnow() + timedelta(days=14)
 
         with db.session_scope() as s:
             rep = report.build(s, client_id, month)
@@ -74,7 +79,16 @@ def test_report_end_to_end(session, tmp_path):
 
         with db.session_scope() as s:
             dev = s.get(Device, dev.id)
-            dev.posture = {"hash": "x" * 16, "values": {}}  # settings read, LAPS failing
+            # A posture report that read nothing the rules need: still "not checked", never a pass.
+            dev.posture = {"hash": "x" * 16, "values": {}}
+        with db.session_scope() as s:
+            checks = {i.title: i for i in report.build(s, client_id, month).checklist}
+            assert checks["Windows Firewall is on"].status == "unknown"
+            assert checks["Local admin passwords are unique and rotated"].status == "unknown"
+        with db.session_scope() as s:
+            dev = s.get(Device, dev.id)
+            # Every read present but unset: Windows defaults, so the firewall is on and LAPS is missing.
+            dev.posture = {"hash": "x" * 16, "values": {k: None for k in posture.ruleset().reads}}
             f = Finding(device_id=dev.id, source="posture", subject_key="laps-missing", subject="LAPS is not set up",
                         cve_id="laps-missing", fix_key="posture:laps-missing", fix_label="Set up Windows LAPS", status="open",
                         first_seen=datetime(2026, 1, 1), last_seen=datetime(2026, 1, 1), opened_at=datetime(2026, 1, 1))
@@ -134,3 +148,14 @@ def test_grade_penalties_are_capped(session):
     assert most < each * 10  # ten exploited fixes cost the cap, not 150 points
     assert timedelta(hours=24) == report.SILENT
     assert rep.deductions == []
+
+
+def test_unknown_windows_support_is_not_a_yes(session):
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "Ltsc")
+        site, _ = tenants.create_site(s, c, "Plant")
+        s.add(Device(site_id=site.id, machine_guid="a" * 32, hostname="LINE-1", token_hash="a" * 64, enrolled_at=utcnow(),
+                     last_seen=utcnow(), os_build="10.0.17763.1000", os_caption="Windows 10 Enterprise LTSC 2019"))
+        s.flush()
+        item = next(i for i in report.build(s, c.id, date(2026, 10, 1)).checklist if i.title.startswith("Every PC runs"))
+    assert item.status == "unknown" and item.detail == "Support dates are unknown for 1 PC."
