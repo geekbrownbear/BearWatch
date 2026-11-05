@@ -212,6 +212,5 @@ def test_serious_network_issue_costs_points_once(session):
             "hosts": [{"ip": "10.0.0.9", "ports": [{"port": 6379}],
                        "issues": [{"id": "PIS-0003", "port": 6379, "title": "Redis open", "cvss": 9.3}]}]}))
         rep = report.build(s, c.id, date(2026, 10, 1), now=now)
-    assert (15 - 5, "1 serious issue on the office network or open to the internet") in [(p - 0, t) for p, t in rep.deductions] or \
-        (10, "1 serious issue on the office network or open to the internet") in rep.deductions
+    assert (10, "1 serious issue on the office network or open to the internet") in rep.deductions
     assert not any("checklist" in t for _, t in rep.deductions)  # not counted twice
