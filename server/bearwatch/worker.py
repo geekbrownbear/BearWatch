@@ -18,7 +18,7 @@ import threading
 import time
 from datetime import timedelta
 
-from . import findings, posture, scoring
+from . import findings, halo, posture, scoring
 from .db import init_db, session_scope
 from .intel.common import run_sync, utcnow
 from .jobs import JOBS
@@ -26,6 +26,7 @@ from .models import SyncState
 
 log = logging.getLogger("bearwatch.worker")
 DEVICE_TICK = 30
+HALO_TICK = 900  # HaloPSA tickets, after device evaluation (docs/halo.md)
 FEED_TICK = 300
 ERROR_BACKOFF = timedelta(minutes=30)
 
@@ -74,6 +75,17 @@ def run_devices() -> None:
                 return
 
 
+def run_halo() -> None:
+    """Live ticket sync only. A dry run writes nothing; `bearwatch halo sync` shows what it would do."""
+    api = halo.api_from_settings()
+    if api is None or isinstance(api, halo.DryRunApi):
+        return
+    try:
+        run_sync("halo", lambda s: halo.sync(s, api))
+    except Exception:  # logged in run_sync
+        pass
+
+
 def feeds_loop(stop: threading.Event, tick: float = FEED_TICK) -> None:
     """Run due feed syncs now and then every `tick` seconds until `stop` is set."""
     while not stop.is_set():
@@ -95,11 +107,15 @@ def main() -> None:
     init_db()
     log.info("worker started, jobs: %s", ", ".join(JOBS))
     feeds = start_feeds(threading.Event())
+    last_halo = 0.0
     while True:
         try:
             run_devices()
         except Exception:
             log.exception("device evaluation loop failed")
+        if time.monotonic() - last_halo >= HALO_TICK:
+            last_halo = time.monotonic()
+            run_halo()
         if not feeds.is_alive():  # feeds_loop catches everything, so this should never happen
             log.error("feed thread stopped; restarting it")
             feeds = start_feeds(threading.Event())
