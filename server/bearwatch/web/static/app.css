@@ -50,6 +50,7 @@ button.link { background: none; border: 0; color: var(--cyan); cursor: pointer; 
 .tile .n { font-family: "Mozilla Text", "Inter", sans-serif; font-size: 30px; font-weight: 650; color: var(--text); }
 .tile .l { color: var(--text-3); font-size: 13px; }
 .tile.alert .n { color: var(--bad); }
+.tile.warn .n { color: var(--warn); }
 
 .card { background: var(--bg-deep); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin: 14px 0; }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px 24px; }
@@ -108,3 +109,6 @@ pre.cmd { background: var(--bg-deep); border: 1px solid var(--line); border-radi
   input[type=text], input[type=password], input[type=date], select { min-width: 0; width: 100%; }
   .form-row > * { width: 100%; }
 }
+
+/* Network page: devices not in the latest scan */
+tr.dim td { opacity: 0.6; }

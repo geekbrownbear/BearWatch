@@ -5,6 +5,7 @@ unchanged PC costs one small heartbeat. Storing an inventory replaces the device
 software, KB and Windows Update lists and queues the device for matching in the worker.
 """
 
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from . import posture
+from . import posture, sensor
 from .intel.common import utcnow
 from .match import windows
 from .models import Device, DeviceKb, DeviceSoftware, WuaUpdate
@@ -68,6 +69,8 @@ class Inventory(BaseModel):
     software: list[Program] = Field(default=[], max_length=5000)
     wua: WuaResult | None = None
     posture: PostureReport | None = None  # agents before 0.2.0 send none
+    # Network adapter MACs, so sensor hosts can be matched to this PC. Agents before 0.3.0 send none.
+    macs: list[Annotated[str, StringConstraints(max_length=64)]] = Field(default=[], max_length=64)
 
 
 def store(s: Session, dev: Device, inv: Inventory) -> None:
@@ -109,4 +112,8 @@ def store(s: Session, dev: Device, inv: Inventory) -> None:
         # An older agent took over (downgrade or reinstall): don't keep judging stale values.
         # Open posture findings stay open, since no data is not evidence of a fix.
         dev.posture, dev.posture_at = None, None
+
+    macs = sorted({m.strip().lower().replace("-", ":") for m in inv.macs} - {"00:00:00:00:00:00"})
+    dev.macs = [m for m in macs if re.match(sensor.MAC_RE, m)] or None
     s.flush()
+    sensor.link_device(s, dev)

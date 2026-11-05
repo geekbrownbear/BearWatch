@@ -9,6 +9,8 @@
   <div class="tile"><div class="n">{{ totals.open }}</div><div class="l">Open findings</div></div>
   <div class="tile {% if totals.exploited %}alert{% endif %}"><div class="n">{{ totals.exploited }}</div><div class="l">Known exploited</div></div>
   <div class="tile {% if totals.overdue %}alert{% endif %}"><div class="n">{{ totals.overdue }}</div><div class="l">Past their fix deadline</div></div>
+  <div class="tile {% if totals.net_new %}alert{% endif %}"><div class="n">{{ totals.net_new }}</div><div class="l">New on a network this week</div></div>
+  <div class="tile {% if totals.net_issues %}alert{% endif %}"><div class="n">{{ totals.net_issues }}</div><div class="l">Open network issues</div></div>
 </div>
 
 <h2>Top fixes</h2>
@@ -18,7 +20,7 @@
 <h2>Clients</h2>
 {% if clients %}
 <div class="table-wrap"><table>
-  <thead><tr><th>Client</th><th class="num">Devices</th><th class="num">Silent</th><th class="num">Open findings</th><th class="num">Known exploited</th><th class="num">Overdue</th><th>Most urgent fix</th></tr></thead>
+  <thead><tr><th>Client</th><th class="num">Devices</th><th class="num">Silent</th><th class="num">Open findings</th><th class="num">Known exploited</th><th class="num">Overdue</th><th class="num">New on network</th><th class="num">Network issues</th><th>Most urgent fix</th></tr></thead>
   <tbody>
   {% for c in clients %}
     <tr>
@@ -28,6 +30,8 @@
       <td class="num">{{ c.open }}</td>
       <td class="num">{% if c.exploited %}<span class="t1">{{ c.exploited }}</span>{% else %}0{% endif %}</td>
       <td class="num">{% if c.overdue %}<span class="bad">{{ c.overdue }}</span>{% else %}0{% endif %}</td>
+      <td class="num">{% if c.net_new %}<span class="t1">{{ c.net_new }}</span>{% else %}0{% endif %}</td>
+      <td class="num">{% if c.net_issues %}<span class="bad">{{ c.net_issues }}</span>{% else %}0{% endif %}</td>
       <td>{% if c.top_fix %}<a href="/fix?key={{ quote(c.top_fix.fix_key) }}&amp;client={{ c.client.id }}">{{ c.top_fix.label }}</a> {{ m.tier(c.top_fix.tier) }}{% else %}<span class="muted">None</span>{% endif %}</td>
     </tr>
   {% endfor %}

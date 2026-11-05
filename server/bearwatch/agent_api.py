@@ -4,6 +4,7 @@
   POST /api/agent/heartbeat  device token          -> whether to upload, collect now, run the WUA check
   POST /api/agent/inventory  device token, gzip    -> stored, matched later by the worker
   POST /api/agent/posture    device token          -> the settings values to read (posture rules)
+  POST /api/agent/sensor     device token, gzip    -> a network scan from the site's sensor PC
 
 The heartbeat carries the hash of the agent's latest inventory, so an unchanged PC never
 uploads. It also returns the hash of the posture read list; an agent holding a different list
@@ -18,7 +19,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from . import inventory, posture, tenants
+from . import inventory, posture, sensor, tenants
 from .config import get_settings
 from .db import session_scope
 from .intel.common import utcnow
@@ -28,7 +29,7 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 MAX_BODY = 8 * 1024 * 1024  # decompressed; a large PC inventory is well under 1 MB
 # On the wire, checked as the body arrives (see BodyLimit). The agent always gzips; a real
 # inventory is about 10 KB compressed, and enroll and heartbeat are a few hundred bytes.
-WIRE_LIMITS = (("/api/agent/inventory", 2 * 1024 * 1024), ("/api/agent/", 16 * 1024))
+WIRE_LIMITS = (("/api/agent/inventory", 2 * 1024 * 1024), ("/api/agent/sensor", 2 * 1024 * 1024), ("/api/agent/", 16 * 1024))
 
 
 class BodyLimit:
@@ -91,6 +92,8 @@ def _plan(dev: Device, site: Site, inventory_hash: str | None) -> dict:
         "heartbeat_seconds": cfg.heartbeat_seconds,
         "collect_seconds": cfg.collect_seconds,
         "posture_hash": posture.ruleset().hash,  # agents before 0.2.0 ignore it
+        # Only the site's sensor PC scans the network; agents before 0.3.0 ignore it.
+        "sensor": {"interval_minutes": cfg.sensor_interval_minutes} if site.sensor_device_id == dev.id else None,
     }
 
 
@@ -125,6 +128,29 @@ def posture_reads(authorization: str = Header(default="")) -> dict:
     return {"hash": rs.hash, "reads": rs.reads}
 
 
+async def _body(request: Request) -> bytes:
+    """The request body, gunzipped if the agent compressed it, capped at MAX_BODY."""
+    raw = await request.body()
+    if request.headers.get("content-encoding", "").lower() == "gzip":
+        try:
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            raw = d.decompress(raw, MAX_BODY)
+            if d.unconsumed_tail:
+                raise HTTPException(413, "request body too large")
+        except (zlib.error, gzip.BadGzipFile) as e:
+            raise HTTPException(400, "bad gzip body") from e
+    elif len(raw) > MAX_BODY:
+        raise HTTPException(413, "request body too large")
+    return raw
+
+
+def _parse(model, raw: bytes):
+    try:
+        return model.model_validate_json(raw)
+    except ValidationError as e:
+        raise HTTPException(422, e.errors(include_url=False, include_context=False)) from e
+
+
 @router.post("/inventory", status_code=202)
 async def upload_inventory(request: Request, authorization: str = Header(default="")) -> dict:
     # Check the token before reading the body, so a stranger costs one indexed lookup.
@@ -133,24 +159,34 @@ async def upload_inventory(request: Request, authorization: str = Header(default
         if dev is None:
             raise HTTPException(401, "unknown device token; re-enroll")
         device_id = dev.id
-    raw = await request.body()
-    if request.headers.get("content-encoding", "").lower() == "gzip":
-        try:
-            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
-            raw = d.decompress(raw, MAX_BODY)
-            if d.unconsumed_tail:
-                raise HTTPException(413, "inventory too large")
-        except (zlib.error, gzip.BadGzipFile) as e:
-            raise HTTPException(400, "bad gzip body") from e
-    elif len(raw) > MAX_BODY:
-        raise HTTPException(413, "inventory too large")
-    try:
-        inv = inventory.Inventory.model_validate_json(raw)
-    except ValidationError as e:
-        raise HTTPException(422, e.errors(include_url=False, include_context=False)) from e
+    inv = _parse(inventory.Inventory, await _body(request))
     with session_scope() as s:
         dev = s.get(Device, device_id)
         if dev is None:  # deleted while the body was in flight
             raise HTTPException(401, "unknown device token; re-enroll")
         inventory.store(s, dev, inv)
     return {"accepted": True}
+
+
+@router.post("/sensor")
+async def upload_sensor(request: Request, authorization: str = Header(default="")) -> dict:
+    """A network scan from the site's sensor PC. Any other PC gets 409, which tells the agent
+    to stop scanning until a heartbeat names it the sensor again."""
+    with session_scope() as s:
+        dev = tenants.device_for_token(s, _token(authorization))
+        if dev is None:
+            raise HTTPException(401, "unknown device token; re-enroll")
+        site = s.get(Site, dev.site_id)
+        if site is None or site.sensor_device_id != dev.id:
+            raise HTTPException(409, "this device is not the site's sensor")
+        device_id = dev.id
+    rep = _parse(sensor.Report, await _body(request))
+    with session_scope() as s:
+        dev = s.get(Device, device_id)
+        site = s.get(Site, dev.site_id) if dev is not None else None
+        if dev is None or site is None:
+            raise HTTPException(401, "unknown device token; re-enroll")
+        if site.sensor_device_id != dev.id:  # changed while the body was in flight
+            raise HTTPException(409, "this device is not the site's sensor")
+        dev.last_seen = utcnow()
+        return {"hosts": sensor.store(s, site, rep)}
