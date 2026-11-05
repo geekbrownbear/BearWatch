@@ -679,7 +679,24 @@ def report_preview(request: Request, client_id: int, month: str | None = None, u
     with session_scope() as s:
         s.get(Client, client_id) or _404()
         r = report.build(s, client_id, _report_month(month))
-        return HTMLResponse(report.render_html(r, screen=True, static="/static"))
+        html = report.render_html(r, screen=True, static="/static")
+        return HTMLResponse(html, headers={"Content-Security-Policy": _inline_style_csp(html)})
+
+
+def _inline_style_csp(html: str) -> str:
+    """The site's policy blocks inline styles. The report keeps its stylesheet inline, since
+    WeasyPrint renders the same page into the PDF, so the preview allows exactly that stylesheet
+    by its hash and nothing else."""
+    import base64
+    import hashlib
+
+    from ..api import SECURITY_HEADERS
+
+    hashes = [f"'sha256-{base64.b64encode(hashlib.sha256(m.encode()).digest()).decode()}'"
+              for m in re.findall(r"<style>(.*?)</style>", html, re.S)]
+    policy = SECURITY_HEADERS["Content-Security-Policy"]
+    assert "style-src 'self';" in policy
+    return policy.replace("style-src 'self';", f"style-src 'self' {' '.join(hashes)};")
 
 
 @router.get("/clients/{client_id}/report.pdf")
