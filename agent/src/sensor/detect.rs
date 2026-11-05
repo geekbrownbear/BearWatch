@@ -5,19 +5,30 @@
 //! agent leaves CVE matching to the server, so only the name and version are kept here (for the
 //! "Software version detected" finding). HTTP goes through ureq 2 with native-tls.
 //!
+//! How a port is probed is decided from its number alone, before any byte is sent ([`plan`]):
+//!
 //! | Port(s) | Method |
 //! |---|---|
+//! | printing: 515 (LPD), 9100 to 9102 (raw / JetDirect) | connect only. Nothing is ever written: a printer prints whatever arrives there |
 //! | web ports (80, 8080, 443, 8443 ...) | HTTP(S) `GET /`: `Server` / `X-Powered-By` headers, page content |
-//! | 22 / anything starting `SSH-` | SSH greeting |
 //! | 21 | FTP greeting, then the documented `anonymous` login, then QUIT |
-//! | 3306 | MySQL/MariaDB handshake packet (version string) |
+//! | 3306 | MySQL/MariaDB handshake packet (read only) |
 //! | 6379 | Redis `INFO server` (read-only; also tells whether a password is required) |
 //! | 5900 to 5903 | VNC version and offered security types (no authentication attempted) |
 //! | 11211 | memcached `version` |
 //! | 1883 | MQTT CONNECT without credentials, then DISCONNECT |
 //! | 2375 | Docker Engine API `GET /version` |
 //! | 9200 | Elasticsearch `GET /` |
-//! | other | read the greeting; if silent, one neutral probe tells Redis / memcached / HTTP / HTTPS apart |
+//! | 23, 139, 445, 3389 | the open port is the finding; nothing written |
+//! | other | read the greeting only. Bytes are sent only if the greeting identifies FTP |
+//!
+//! Proton sends a Redis command and then an HTTP request to any silent unknown service to
+//! tell them apart. The agent does not: a silent service is left alone, so nothing is ever
+//! written to a service that was not identified first, by its well-known port or its greeting.
+//!
+//! When a probe cannot finish (connect failure, timeout, short or unparseable reply), the
+//! service is marked `inconclusive`, and the server keeps that port's earlier findings open
+//! instead of taking the silence for a fix.
 //!
 //! Non-destructive by design: only fixed, read-only requests and documented anonymous access.
 //! At most 64 KiB is read per response, with timeouts, and all received text is treated as
@@ -30,7 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::checks::{self, Finding};
-use super::ports::service_name;
+use super::ports::{is_print_port, service_name};
 
 /// Most bytes read from one response.
 const MAX_READ: usize = 64 * 1024;
@@ -73,6 +84,8 @@ pub struct Service {
     pub products: Vec<Product>,
     /// First line the service sent, or the web server header (cleaned).
     pub banner: Option<String>,
+    /// A check that applies here could not finish, so "no finding" proves nothing.
+    pub inconclusive: bool,
 }
 
 /// Shared settings for probing.
@@ -99,28 +112,68 @@ impl ProbeCtx {
 
 const HTTPS_PORTS: [u16; 7] = [443, 4443, 5001, 8443, 9443, 10443, 7443];
 const HTTP_PORTS: [u16; 17] = [80, 81, 591, 2375, 3000, 5000, 7547, 8000, 8008, 8080, 8081, 8088, 8090, 8888, 9000, 9200, 32400];
+/// Plain-text services that always greet first. Silence on these means the read failed.
+const GREETING_PORTS: [u16; 6] = [21, 22, 25, 110, 143, 587];
+
+/// How a port is probed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// Printing ports: the scan's connect is all; nothing is written or read.
+    ConnectOnly,
+    /// The open port itself is the finding (Telnet, SMB, RDP); nothing is written.
+    Exposed,
+    /// Read what the service sends by itself. Writes only after an FTP greeting.
+    Greeting,
+    Http(&'static str),
+    Mysql,
+    Redis,
+    Vnc,
+    Memcached,
+    Mqtt,
+    Ftp,
+}
+
+/// The probe for a port, decided by the port number alone.
+pub fn plan(port: u16) -> Plan {
+    match port {
+        p if is_print_port(p) => Plan::ConnectOnly,
+        p if HTTPS_PORTS.contains(&p) => Plan::Http("https"),
+        p if HTTP_PORTS.contains(&p) => Plan::Http("http"),
+        3306 => Plan::Mysql,
+        6379 => Plan::Redis,
+        5900..=5903 => Plan::Vnc,
+        11211 => Plan::Memcached,
+        1883 => Plan::Mqtt,
+        21 => Plan::Ftp,
+        23 | 139 | 445 | 3389 => Plan::Exposed,
+        _ => Plan::Greeting,
+    }
+}
 
 /// Identify the service on ip:port and run the checks that apply to it.
 pub fn probe(ip: Ipv4Addr, port: u16, ctx: &ProbeCtx) -> (Service, Vec<Finding>) {
-    let mut svc = Service { ip, port, name: service_name(port), products: Vec::new(), banner: None };
+    probe_as(ip, port, plan(port), ctx)
+}
+
+pub(super) fn probe_as(ip: Ipv4Addr, port: u16, plan: Plan, ctx: &ProbeCtx) -> (Service, Vec<Finding>) {
+    let mut svc = Service { ip, port, name: service_name(port), products: Vec::new(), banner: None, inconclusive: false };
     let mut findings = Vec::new();
 
-    match port {
-        p if HTTPS_PORTS.contains(&p) => http_probe(&mut svc, &mut findings, ctx, "https"),
-        p if HTTP_PORTS.contains(&p) => http_probe(&mut svc, &mut findings, ctx, "http"),
-        3306 => mysql_probe(&mut svc, &mut findings, ctx),
-        6379 => redis_probe(&mut svc, &mut findings, ctx),
-        5900..=5903 => vnc_probe(&mut svc, &mut findings, ctx),
-        11211 => memcached_probe(&mut svc, &mut findings, ctx),
-        1883 => mqtt_probe(&mut svc, &mut findings, ctx),
-        21 => ftp_probe(&mut svc, &mut findings, ctx),
-        23 => {
-            svc.name = "telnet";
-            findings.push(checks::TELNET.finding(port, "Port 23 accepts Telnet connections."));
-        }
-        3389 => findings.push(checks::RDP_EXPOSED.finding(port, "Port 3389 is open.")),
-        445 | 139 => findings.push(checks::SMB_EXPOSED.finding(port, format!("Port {port} is open."))),
-        _ => generic_probe(&mut svc, &mut findings, ctx),
+    match plan {
+        Plan::ConnectOnly => {}
+        Plan::Exposed => match port {
+            23 => findings.push(checks::TELNET.finding(port, "Port 23 accepts Telnet connections.")),
+            3389 => findings.push(checks::RDP_EXPOSED.finding(port, "Port 3389 is open.")),
+            _ => findings.push(checks::SMB_EXPOSED.finding(port, format!("Port {port} is open."))),
+        },
+        Plan::Greeting => greeting_probe(&mut svc, &mut findings, ctx),
+        Plan::Http(scheme) => http_probe(&mut svc, &mut findings, ctx, scheme),
+        Plan::Mysql => mysql_probe(&mut svc, &mut findings, ctx),
+        Plan::Redis => redis_probe(&mut svc, &mut findings, ctx),
+        Plan::Vnc => vnc_probe(&mut svc, &mut findings, ctx),
+        Plan::Memcached => memcached_probe(&mut svc, &mut findings, ctx),
+        Plan::Mqtt => mqtt_probe(&mut svc, &mut findings, ctx),
+        Plan::Ftp => ftp_probe(&mut svc, &mut findings, ctx),
     }
 
     // One informational finding listing the detected software versions.
@@ -135,10 +188,14 @@ pub fn probe(ip: Ipv4Addr, port: u16, ctx: &ProbeCtx) -> (Service, Vec<Finding>)
 // Probes
 // ---------------------------------------------------------------------------
 
-/// Unknown port: read a greeting; recognise SSH / FTP / SMTP; else try HTTP.
-fn generic_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
-    let banner = connect(svc.ip, svc.port, ctx.timeout).and_then(|mut s| read_line(&mut s, ctx.timeout));
-    match banner {
+/// Any other port: read the greeting and recognise SSH / FTP / SMTP. Read-only unless the
+/// greeting says FTP. A silent service is left alone.
+fn greeting_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
+    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else {
+        svc.inconclusive = true;
+        return;
+    };
+    match read_line(&mut s, ctx.timeout) {
         Some(b) if b.starts_with("SSH-") => {
             svc.name = "ssh";
             svc.products.extend(parse_ssh_banner(&b));
@@ -148,6 +205,7 @@ fn generic_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx)
             let l = b.to_ascii_lowercase();
             if !l.contains("smtp") && (l.contains("ftp") || parse_ftp_banner(&b).is_some()) {
                 // FTP on an unusual port: run the full FTP checks (fresh connection).
+                drop(s);
                 ftp_probe(svc, findings, ctx);
             } else {
                 if l.contains("smtp") {
@@ -158,34 +216,17 @@ fn generic_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx)
             }
         }
         Some(b) => svc.banner = Some(b),
-        None => {
-            // Silent service: one neutral probe tells the common silent protocols apart.
-            // "INFO server" is a read-only Redis command; other servers answer with an error.
-            let reply = connect(svc.ip, svc.port, ctx.timeout)
-                .map(|mut s| {
-                    let _ = s.write_all(b"INFO server\r\n");
-                    read_some(&mut s, 4096, ctx.timeout)
-                })
-                .unwrap_or_default();
-            let text = String::from_utf8_lossy(&reply);
-            if text.contains("redis_version:") || text.starts_with("-NOAUTH") || text.starts_with("-DENIED") {
-                redis_probe(svc, findings, ctx);
-            } else if text.starts_with("ERROR") {
-                memcached_probe(svc, findings, ctx);
-            } else if reply.starts_with(&[0x15, 0x03]) {
-                // A TLS alert: the service speaks TLS, most likely HTTPS.
-                http_probe(svc, findings, ctx, "https");
-            } else if text.starts_with("HTTP/") || reply.is_empty() {
-                http_probe(svc, findings, ctx, "http");
-            }
-        }
+        None => svc.inconclusive = GREETING_PORTS.contains(&svc.port),
     }
 }
 
 fn http_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx, scheme: &str) {
     let (ip, port) = (svc.ip, svc.port);
     let path = if port == 2375 { "/version" } else { "/" };
-    let Some(resp) = http_get(ctx, scheme, ip, port, path) else { return };
+    let Some(resp) = http_get(ctx, scheme, ip, port, path) else {
+        svc.inconclusive = true;
+        return;
+    };
     if scheme == "https" {
         svc.name = "https";
     } else if svc.name == "unknown" {
@@ -249,7 +290,10 @@ fn http_get(ctx: &ProbeCtx, scheme: &str, ip: Ipv4Addr, port: u16, path: &str) -
 }
 
 fn mysql_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
-    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else { return };
+    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else {
+        svc.inconclusive = true;
+        return;
+    };
     let pkt = read_some(&mut s, 512, ctx.timeout);
     // Packet: 3-byte length, 1-byte sequence, then protocol version 10 and a NUL-terminated
     // server version. 0xFF = error packet (e.g. "host not allowed"), still MySQL/MariaDB.
@@ -262,13 +306,17 @@ fn mysql_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
             findings.push(checks::DATABASE_EXPOSED.finding(svc.port, format!("Server version {}", clean(&ver, 60))));
         }
         Some(0xFF) => svc.name = "mysql",
-        _ => {}
+        _ => svc.inconclusive = true,
     }
 }
 
 fn redis_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
-    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else { return };
+    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else {
+        svc.inconclusive = true;
+        return;
+    };
     if s.write_all(b"INFO server\r\n").is_err() {
+        svc.inconclusive = true;
         return;
     }
     let reply = String::from_utf8_lossy(&read_some(&mut s, 8192, ctx.timeout)).into_owned();
@@ -278,15 +326,25 @@ fn redis_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
             svc.products.push(Product::new("Redis", v.trim(), None));
         }
         findings.push(checks::REDIS_NOAUTH.finding(svc.port, "INFO command answered without a password."));
-    } else if reply.starts_with("-NOAUTH") || reply.contains("Authentication required") {
+    } else if reply.starts_with("-NOAUTH") || reply.starts_with("-DENIED") || reply.contains("Authentication required") {
+        // Password required, or protected mode refusing remote clients: positively safe.
         svc.name = "redis";
+    } else {
+        // Nothing, or an answer that is neither: the check could not tell.
+        svc.inconclusive = true;
     }
 }
 
 fn vnc_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
-    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else { return };
+    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else {
+        svc.inconclusive = true;
+        return;
+    };
     let hello = read_some(&mut s, 12, ctx.timeout);
-    let Some(ver) = std::str::from_utf8(&hello).ok().filter(|v| v.starts_with("RFB ")) else { return };
+    let Some(ver) = std::str::from_utf8(&hello).ok().filter(|v| v.starts_with("RFB ")) else {
+        svc.inconclusive = true;
+        return;
+    };
     svc.name = "vnc";
     svc.banner = Some(clean(ver, 20));
     let minor: u32 = ver.get(8..11).and_then(|m| m.parse().ok()).unwrap_or(3);
@@ -299,9 +357,15 @@ fn vnc_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
         b"RFB 003.003\n"
     };
     if s.write_all(ours).is_err() {
+        svc.inconclusive = true;
         return;
     }
     let reply = read_some(&mut s, 64, ctx.timeout);
+    let complete = if minor < 7 { reply.len() >= 4 } else { !reply.is_empty() };
+    if !complete {
+        svc.inconclusive = true;
+        return;
+    }
     // 3.3: a 4-byte security type chosen by the server. 3.7+: a count and a list.
     let no_auth = if minor < 7 {
         reply.get(0..4) == Some(&[0, 0, 0, 1])
@@ -315,8 +379,12 @@ fn vnc_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
 }
 
 fn memcached_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
-    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else { return };
+    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else {
+        svc.inconclusive = true;
+        return;
+    };
     if s.write_all(b"version\r\n").is_err() {
+        svc.inconclusive = true;
         return;
     }
     let reply = String::from_utf8_lossy(&read_some(&mut s, 256, ctx.timeout)).into_owned();
@@ -324,32 +392,42 @@ fn memcached_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCt
         svc.name = "memcached";
         svc.products.push(Product::new("memcached", v.trim(), None));
         findings.push(checks::MEMCACHED_NOAUTH.finding(svc.port, "'version' answered without authentication."));
+    } else if reply.is_empty() {
+        svc.inconclusive = true;
     }
 }
 
 fn mqtt_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
-    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else { return };
+    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else {
+        svc.inconclusive = true;
+        return;
+    };
     // CONNECT, MQTT 3.1.1, clean session, keep-alive 60 s, client id "bw-sensor", no credentials.
     const CONNECT: [u8; 23] = [0x10, 21, 0, 4, b'M', b'Q', b'T', b'T', 4, 0x02, 0, 60, 0, 9, b'b', b'w', b'-', b's', b'e', b'n', b's', b'o', b'r'];
     if s.write_all(&CONNECT).is_err() {
+        svc.inconclusive = true;
         return;
     }
     let ack = read_some(&mut s, 4, ctx.timeout);
-    if ack.first() == Some(&0x20) {
-        svc.name = "mqtt";
-        if ack.get(3) == Some(&0) {
-            findings.push(checks::MQTT_ANONYMOUS.finding(svc.port, "CONNECT without credentials was accepted (CONNACK 0)."));
-        }
-        let _ = s.write_all(&[0xE0, 0]); // DISCONNECT
+    // CONNACK: 0x20, length 2, flags, return code.
+    if ack.first() != Some(&0x20) || ack.len() < 4 {
+        svc.inconclusive = true;
+        return;
     }
+    svc.name = "mqtt";
+    if ack[3] == 0 {
+        findings.push(checks::MQTT_ANONYMOUS.finding(svc.port, "CONNECT without credentials was accepted (CONNACK 0)."));
+    }
+    let _ = s.write_all(&[0xE0, 0]); // DISCONNECT
 }
 
 fn ftp_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
-    let Some(mut s) = connect(svc.ip, svc.port, ctx.timeout) else { return };
-    let Some(greeting) = ftp_reply(&mut s, ctx.timeout) else { return };
-    if !greeting.starts_with("220") {
+    let greeting = connect(svc.ip, svc.port, ctx.timeout).and_then(|mut s| ftp_reply(&mut s, ctx.timeout).map(|g| (s, g)));
+    let Some((mut s, greeting)) = greeting.filter(|(_, g)| g.starts_with("220")) else {
+        // No connection, no greeting, or "421 too many users": the checks could not run.
+        svc.inconclusive = true;
         return;
-    }
+    };
     svc.name = "ftp";
     svc.banner = Some(greeting.clone());
     svc.products.extend(parse_ftp_banner(&greeting));
@@ -364,6 +442,8 @@ fn ftp_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
     }
     if reply.starts_with("230") {
         findings.push(checks::FTP_ANONYMOUS.finding(svc.port, format!("Login as 'anonymous' accepted: {reply}")));
+    } else if reply.is_empty() {
+        svc.inconclusive = true;
     }
     let _ = s.write_all(b"QUIT\r\n");
 }
@@ -551,7 +631,7 @@ mod tests {
     use super::*;
 
     fn svc(port: u16) -> Service {
-        Service { ip: Ipv4Addr::LOCALHOST, port, name: "unknown", products: vec![], banner: None }
+        Service { ip: Ipv4Addr::LOCALHOST, port, name: "unknown", products: vec![], banner: None, inconclusive: false }
     }
 
     #[test]
@@ -660,5 +740,83 @@ mod tests {
         assert_eq!(s.banner.as_deref(), Some("Server: lighttpd/1.4.59"));
         assert_eq!(s.products[0].label(), "lighttpd 1.4.59");
         assert!(f.iter().any(|x| x.check.id == "PIS-0009"));
+    }
+
+    /// Printing ports get no active probe and no greeting probe: nothing is ever sent there.
+    #[test]
+    fn printing_ports_are_connect_only() {
+        for port in [515, 9100, 9101, 9102] {
+            assert_eq!(plan(port), Plan::ConnectOnly, "port {port}");
+        }
+        // Every preset port gets a plan, and none of the printing ones a writing plan.
+        for port in super::super::ports::preset() {
+            if is_print_port(port) {
+                assert_eq!(plan(port), Plan::ConnectOnly);
+            }
+        }
+        assert_eq!(plan(6379), Plan::Redis);
+        assert_eq!(plan(22), Plan::Greeting);
+    }
+
+    /// A loopback server that records what the probe sent, staying silent.
+    fn silent_server() -> (u16, std::thread::JoinHandle<Vec<u8>>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut got = Vec::new();
+            let _ = s.read_to_end(&mut got);
+            got
+        });
+        (port, t)
+    }
+
+    /// The connect-only and greeting probes never write to a silent service (a raw print port
+    /// would print it), and a silent unknown service is not "inconclusive".
+    #[test]
+    fn silent_services_receive_nothing() {
+        let ctx = ProbeCtx::new(Duration::from_millis(300));
+        for plan in [Plan::ConnectOnly, Plan::Greeting] {
+            let (port, t) = silent_server();
+            if plan == Plan::ConnectOnly {
+                // The port scan's own connect, which is all a printing port gets.
+                drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
+            }
+            let (svc, findings) = probe_as(Ipv4Addr::LOCALHOST, port, plan, &ctx);
+            assert_eq!(t.join().unwrap(), b"", "{plan:?} wrote to the service");
+            assert!(findings.is_empty() && !svc.inconclusive, "{plan:?}");
+        }
+    }
+
+    /// A probe that cannot finish marks the port inconclusive; a positive "safe" does not.
+    #[test]
+    fn failed_probes_are_inconclusive() {
+        let ctx = ProbeCtx::new(Duration::from_millis(300));
+        // Nothing listening.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        for plan in [Plan::Redis, Plan::Http("http"), Plan::Mysql, Plan::Ftp, Plan::Mqtt, Plan::Memcached, Plan::Vnc, Plan::Greeting] {
+            let (svc, findings) = probe_as(Ipv4Addr::LOCALHOST, closed, plan, &ctx);
+            assert!(svc.inconclusive, "{plan:?}");
+            assert!(findings.is_empty(), "{plan:?}");
+        }
+        // Accepts, but never answers: the Redis check times out.
+        let (port, t) = silent_server();
+        let (svc, findings) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Redis, &ctx);
+        assert!(svc.inconclusive && findings.is_empty());
+        assert_eq!(t.join().unwrap(), b"INFO server\r\n");
+        // Password required: checked and safe.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut b = [0u8; 64];
+            let _ = s.read(&mut b);
+            s.write_all(b"-NOAUTH Authentication required.\r\n").unwrap();
+        });
+        let (svc, findings) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Redis, &ctx);
+        t.join().unwrap();
+        assert!(!svc.inconclusive && findings.is_empty());
+        assert_eq!(svc.name, "redis");
     }
 }
