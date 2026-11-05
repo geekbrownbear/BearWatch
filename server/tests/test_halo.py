@@ -103,7 +103,10 @@ def test_ticket_lifecycle(session, monkeypatch):
     assert {t["summary"] for t in creates} == {"BearWatch: Install kb:5070001", "BearWatch: Install app:late"}
     kb = next(t for t in creates if "kb:" in t["summary"])
     assert kb["client_id"] == 55 and kb["tickettype_id"] == 31
-    assert "PC-A" in kb["details"] and "known exploited" in kb["details"] and "https://bearwatch.example.test/fix?key=kb:5070001" in kb["details"]
+    notepad = halo.Group("winget:Notepad++.Notepad++", "Update Notepad++", 4, 60.0, None, {1: "A (B)"}, [])
+    link = halo._details(notepad, session.get(halo.Client, c.id), "https://bw.test")
+    assert "https://bw.test/fix?key=winget%3ANotepad%2B%2B.Notepad%2B%2B&client=" in link  # "+" survives
+    assert "PC-A" in kb["details"] and "known exploited" in kb["details"] and "https://bearwatch.example.test/fix?key=kb%3A5070001" in kb["details"]
     assert token.call_count == 1  # the token is reused
 
     # Nothing changed: nothing sent.
@@ -237,6 +240,14 @@ def test_codex_review_cases(session, monkeypatch):
             f.exploit_tier = 1
         assert halo.sync(s, api) == 1
     assert "known exploited" in sent[0]["details"]
+
+    # A new release changes the fix label (the target version): the summary follows.
+    sent.clear()
+    with db.session_scope() as s:
+        for f in s.scalars(select(Finding).where(Finding.fix_key == "kb:2")):
+            f.fix_label = "Install kb:2 v2"
+        assert halo.sync(s, api) == 1
+    assert sent[0]["summary"] == "BearWatch: Install kb:2 v2"
 
     # Closed by hand in Halo with nothing changed here: noticed, and a new ticket next pass.
     remote.mock(return_value=httpx.Response(200, json={"status_id": 9}))
