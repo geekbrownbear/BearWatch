@@ -150,6 +150,20 @@ def test_grade_penalties_are_capped(session):
     assert rep.deductions == []
 
 
+def test_empty_fix_list_is_not_a_clean_bill(session):
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "New")
+        site, _ = tenants.create_site(s, c, "Office")
+        s.add(Device(site_id=site.id, machine_guid="b" * 32, hostname="NEW-PC", token_hash="b" * 64, enrolled_at=utcnow(),
+                     last_seen=utcnow()))
+        s.flush()
+        rep = report.build(s, c.id, date(2026, 10, 1))
+    assert rep.top_fixes == [] and rep.unevaluated == 1
+    assert rep.fixes_note == "No fixes found so far. BearWatch has not checked updates on 1 PC or settings on 1 PC yet."
+    html = report.render_html(rep)
+    assert rep.fixes_note in html and "Every PC has the updates" not in html
+
+
 def test_unknown_windows_support_is_not_a_yes(session):
     with db.session_scope() as s:
         c = tenants.create_client(s, "Ltsc")

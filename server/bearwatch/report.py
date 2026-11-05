@@ -76,6 +76,8 @@ class Report:
     network_issues: list[dict] = field(default_factory=list)
     external: dict = field(default_factory=dict)
     settings_checked: int = 0  # PCs whose settings could be judged at all
+    unevaluated: int = 0  # PCs whose updates have not been measured (no inventory yet, or no data for the build)
+    fixes_note: str = ""  # shown when there are no fixes to list
     checklist: list[CheckItem] = field(default_factory=list)
     score: int = 100
     grade: str = "A"
@@ -293,6 +295,17 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     # A PC with no inventory yet, or whose last evaluation hit an error (no Microsoft data for its
     # build, say), has not had its vulnerabilities measured: it can't help this item pass.
     unevaluated = [d.hostname for d in devs if d.last_match_at is None or d.match_error]
+    r.unevaluated = len(unevaluated)
+    # An empty fix list means "nothing found", which is "nothing to do" only when every PC was
+    # fully checked.
+    gaps = []
+    if unevaluated:
+        gaps.append(f"updates on {plural(len(unevaluated), 'PC')}")
+    if r.devices - r.settings_checked:
+        gaps.append(f"settings on {plural(r.devices - r.settings_checked, 'PC')}")
+    r.fixes_note = ("No PCs report to BearWatch yet." if not ids
+                    else f"No fixes found so far. BearWatch has not checked {' or '.join(gaps)} yet." if gaps
+                    else "Nothing to do. Every PC has the updates and settings BearWatch checks for.")
     r.checklist = [
         setting(["av-unhealthy"], "Antivirus is on and up to date", "On and up to date on every workstation.",
                 "Off or out of date on {workstations}.", workstations_only=True),
