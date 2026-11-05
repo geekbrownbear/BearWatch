@@ -1,8 +1,14 @@
 import threading
 from datetime import timedelta
 
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
 from bearwatch import findings, worker
-from bearwatch.models import SyncState
+from bearwatch.api import app
+from bearwatch.models import Device, SyncState
+
+from .test_agent import _inventory, _post_inv, _seed
 
 
 def test_devices_are_evaluated_while_a_feed_is_still_syncing(session, monkeypatch):
@@ -56,3 +62,25 @@ def test_feed_loop_survives_errors(session, monkeypatch):
         stop.set()
         t.join(5)
     assert len(calls) >= 3, "the loop stopped after the first error"
+
+
+def test_rematch_request_during_evaluation_is_kept(session, monkeypatch):
+    """A feed that finishes mid-evaluation must leave the device queued for another pass."""
+    key = _seed()
+    with TestClient(app) as c:
+        r = c.post("/api/agent/enroll", json={"enroll_key": key, "machine_guid": "0f8fad5b-d9cb-469f-a165-70867728950e",
+                                              "hostname": "BEAR-PC01", "agent_version": "0.1.0"})
+        assert _post_inv(c, r.json()["token"], _inventory("10.0.22631.4317", "131.0.6778.86", "inv-0001")).status_code == 202
+
+    real = findings._app_findings
+
+    def feed_lands_midway(s, dev):
+        findings.mark_all_for_rematch(s)  # what the feed thread does when its sync commits
+        return real(s, dev)
+
+    monkeypatch.setattr(findings, "_app_findings", feed_lands_midway)
+    dev = session.scalars(select(Device)).one()
+    findings.evaluate(session, dev)
+    session.commit()
+    session.expire_all()
+    assert session.scalars(select(Device)).one().needs_match is True

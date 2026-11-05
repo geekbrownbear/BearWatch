@@ -124,6 +124,15 @@ def test_sensor_end_to_end(session):
         (i,) = _issues(session)
         assert i.status == "fixed" and i.fixed_at is not None
 
+        # Redis loses its password again: the same issue reopens. Then a scan reaches the host but
+        # the Redis check times out: the issue stays open, since no answer is not a fix.
+        r = _post_scan(c, sensor_tok, _scan(_host("172.26.71.244", "bc:24:11:41:f4:f1", ports=[6379], issues=[REDIS])))
+        r = _post_scan(c, sensor_tok, _scan({**_host("172.26.71.244", "bc:24:11:41:f4:f1", ports=[22, 6379]), "unchecked_ports": [6379]}))
+        assert r.status_code == 200
+        (i,) = _issues(session)
+        assert i.status == "open"
+        bad = _scan({**_host("172.26.71.244", "bc:24:11:41:f4:f1"), "unchecked_ports": [70000]})
+        assert _post_scan(c, sensor_tok, bad).status_code == 422
         # Redis loses its password again: the same issue reopens. The printer is still off, so
         # nothing about it changes.
         r = _post_scan(c, sensor_tok, _scan(_host("172.26.71.244", "bc:24:11:41:f4:f1", ports=[6379], issues=[REDIS])))

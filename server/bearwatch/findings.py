@@ -112,6 +112,11 @@ def _posture_findings(dev: Device) -> tuple[dict[tuple[str, str, str], Current],
 def evaluate(s: Session, dev: Device) -> dict[str, int]:
     """Recompute one device's findings. Returns counts of found/fixed/reopened/open."""
     now = utcnow()
+    # Claim the request first, before reading any intel. Feed syncs run on another thread; one
+    # that finishes while this runs sets needs_match again (on Postgres its UPDATE waits for this
+    # row's lock, then lands after we commit), so the device is evaluated again with the new
+    # intel. Clearing the flag at the end instead would erase that request.
+    s.execute(update(Device).where(Device.id == dev.id).values(needs_match=False))
     current: dict[tuple[str, str, str], Current] = {}
     errors = []
     os_checked = False
@@ -158,7 +163,7 @@ def evaluate(s: Session, dev: Device) -> dict[str, int]:
     s.flush()
     s.add_all(FindingEvent(finding_id=f.id, device_id=dev.id, event=e, at=now) for f, e in events)
 
-    dev.needs_match, dev.last_match_at = False, now
+    dev.last_match_at = now  # needs_match was cleared at the start; see above
     dev.match_error = "; ".join(errors) or None
     counts["open"] = len(current) + kept
     s.flush()
