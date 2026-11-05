@@ -43,6 +43,32 @@ def test_devices_are_evaluated_while_a_feed_is_still_syncing(session, monkeypatc
     assert st.last_status == "ok" and st.rows == 7
 
 
+def test_devices_are_evaluated_while_halo_hangs(session, monkeypatch):
+    """A Halo outage (30 s per timed-out call, one call per ticket) must not stall evaluation."""
+    started, release = threading.Event(), threading.Event()
+
+    def hung_halo():
+        started.set()
+        assert release.wait(10), "test never released Halo"
+
+    monkeypatch.setattr(worker, "run_halo", hung_halo)
+    evaluated = []
+    monkeypatch.setattr(findings, "evaluate_pending", lambda s: evaluated.append(1) or 0)
+    stop = threading.Event()
+    t = worker.start_halo(stop, tick=0.05)
+    try:
+        assert started.wait(5), "halo thread never started"
+        done = threading.Event()
+        threading.Thread(target=lambda: (worker.run_devices(), done.set()), daemon=True).start()
+        assert done.wait(5), "device evaluation waited for Halo"
+        assert evaluated
+    finally:
+        release.set()
+        stop.set()
+        t.join(5)
+    assert not t.is_alive()
+
+
 def test_feed_loop_survives_errors(session, monkeypatch):
     calls = []
 

@@ -7,7 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="BEARWATCH_", env_file=".env", extra="ignore")
+    # Compose passes an unset variable as "" (BEARWATCH_HALO_TICKET_TYPE_ID=); treat that as unset.
+    model_config = SettingsConfigDict(env_prefix="BEARWATCH_", env_file=".env", extra="ignore", env_ignore_empty=True)
 
     # postgresql+psycopg://user:pass@host/db in Compose; sqlite works for tests and quick local use.
     database_url: str = "sqlite:///./bearwatch.db"
@@ -39,6 +40,20 @@ class Settings(BaseSettings):
     dashboard_auth: str = "token"
     cf_access_team_domain: str = ""  # e.g. bearium.cloudflareaccess.com
     cf_access_aud: str = ""  # the Access application's AUD tag
+    # The dashboard's address as technicians reach it, for links in Halo tickets. Optional.
+    public_url: str = ""
+
+    # HaloPSA tickets (docs/halo.md). Off until url, client id and secret are set; dry run until
+    # halo_dry_run is false. The secret comes from the environment, never the repo.
+    halo_url: str = ""  # https://bearium.halopsa.com
+    halo_tenant: str = ""  # hosted Halo only
+    halo_client_id: str = ""
+    halo_client_secret: str = ""
+    halo_dry_run: bool = True
+    halo_ticket_type_id: int | None = None  # None: Halo's default ticket type
+    halo_closed_status_id: int = 9
+    halo_note_outcome: str = "Private Note"
+    halo_min_risk: float = 50.0  # plus every known exploited or overdue fix
 
     # Contact string for the User-Agent we send to public feeds.
     user_agent: str = "BearWatch/0.1 (+https://github.com/geekbrownbear/BearWatch)"

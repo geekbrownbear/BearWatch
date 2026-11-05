@@ -178,6 +178,8 @@ class Client(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
+    # The client's id in HaloPSA. Tickets are made only for clients that have one.
+    halo_client_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class Site(Base):
@@ -396,3 +398,22 @@ class NetworkIssue(Base):
     fixed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     __table_args__ = (UniqueConstraint("host_id", "check_id", "port"),)
+
+
+class HaloTicket(Base):
+    """The HaloPSA ticket for one fix at one client. Reused while open; a fix that comes back
+    after its ticket closed gets a new ticket (halo_id changes)."""
+
+    __tablename__ = "halo_ticket"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("client.id", ondelete="CASCADE"), index=True)
+    fix_key: Mapped[str] = mapped_column(String(220))
+    halo_id: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(8))  # open | closed
+    digest: Mapped[str] = mapped_column(String(64))  # PCs and CVEs last written to the ticket
+    opened_at: Mapped[datetime] = mapped_column(DateTime)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (UniqueConstraint("client_id", "fix_key"),)

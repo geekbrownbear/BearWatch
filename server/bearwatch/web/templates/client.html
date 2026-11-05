@@ -5,6 +5,12 @@
 <h1>{{ client.name }}</h1>
 <p><a href="/exceptions?client={{ client.id }}">Exceptions for {{ client.name }}</a> · Monthly report: <a href="/clients/{{ client.id }}/report">preview</a>, <a href="/clients/{{ client.id }}/report.pdf">PDF</a></p>
 
+<form class="form-row" method="post" action="/clients/{{ client.id }}/halo">
+  <label>HaloPSA client id <input type="text" name="halo_client_id" inputmode="numeric" pattern="[0-9]*" value="{{ client.halo_client_id or '' }}" size="8"></label>
+  <button class="link" type="submit">Save</button>
+  <span class="muted">{% if not halo_on %}Halo is not set up on this server.{% elif halo_dry %}Halo is in dry run: no tickets are sent.{% elif client.halo_client_id %}{{ halo_open }} open BearWatch {{ "ticket" if halo_open == 1 else "tickets" }} in Halo.{% else %}Add the id to get a Halo ticket for each urgent fix.{% endif %}</span>
+</form>
+
 <h2>Fixes</h2>
 {{ m.fix_table(fixes, client_id=client.id) }}
 

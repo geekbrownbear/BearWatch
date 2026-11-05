@@ -19,11 +19,11 @@ from sqlalchemy import String, and_, case, cast, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import __version__, auth, lifecycle, posture, report, scoring, sensor, tenants
+from .. import __version__, auth, halo, lifecycle, posture, report, scoring, sensor, tenants
 from ..config import get_settings
 from ..db import session_scope
 from ..intel.common import utcnow
-from ..models import (Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, NetworkHost, NetworkIssue, Site,
+from ..models import (Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, HaloTicket, NetworkHost, NetworkIssue, Site,
                       SyncState, WuaUpdate)
 
 HERE = Path(__file__).resolve().parent
@@ -250,7 +250,29 @@ def client_page(request: Request, client_id: int, user: str = Depends(auth.curre
         net = {site.id: {**network_counts(s, site_id=site.id), "sensor": sensor.sensor_device(s, site),
                          "silent": sensor.sensor_silent(site, interval)} for site in sites}
         return render(request, "client.html", user, client=client, sites=sites, fixes=fix_rows(s, client_id=client_id),
-                      devices=device_rows(s, client_id), net=net)
+                      devices=device_rows(s, client_id), net=net, halo_on=halo.configured(), halo_dry=get_settings().halo_dry_run,
+                      halo_open=halo.open_count(s, client_id))
+
+
+@router.post("/clients/{client_id}/halo")
+def set_halo_client(request: Request, client_id: int, halo_client_id: str = Form(""), user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    value = halo_client_id.strip()
+    if value and not value.isdigit():
+        raise HTTPException(400, "the Halo client id is a number")
+    with session_scope() as s:
+        client = s.get(Client, client_id) or _404()
+        new = int(value) if value else None
+        if new != client.halo_client_id:
+            now = utcnow()
+            for row in s.scalars(select(HaloTicket).where(HaloTicket.client_id == client_id, HaloTicket.status == "open")):
+                if new is None:
+                    # Unlinked: BearWatch stops managing these. The tickets stay in Halo as they are.
+                    row.status, row.closed_at, row.updated_at = "closed", now, now
+                else:
+                    row.digest = ""  # rewritten on the next pass, with the new client id
+        client.halo_client_id = new
+    return RedirectResponse(f"/clients/{client_id}", 303)
 
 
 @router.get("/fix", response_class=HTMLResponse)

@@ -192,6 +192,38 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_halo(args) -> int:
+    from . import halo
+
+    if args.action == "client":
+        with session_scope() as s:
+            c = s.get(Client, args.client_id)
+            if c is None:
+                print(f"no client {args.client_id}", file=sys.stderr)
+                return 2
+            c.halo_client_id = None if args.halo_id == "none" else int(args.halo_id)
+            print(f"{c.name}: Halo client id {c.halo_client_id}")
+        return 0
+    api = halo.api_from_settings()
+    if api is None:
+        print("Halo is not set up: set BEARWATCH_HALO_URL, BEARWATCH_HALO_CLIENT_ID and BEARWATCH_HALO_CLIENT_SECRET", file=sys.stderr)
+        return 2
+    dry = isinstance(api, halo.DryRunApi)
+    with session_scope() as s:
+        n = halo.sync(s, api)
+        if dry:
+            s.rollback()  # session_scope then commits an empty transaction
+    if dry:
+        print("Dry run (BEARWATCH_HALO_DRY_RUN is on): nothing was sent or saved.")
+        for call in api.calls:
+            print("  would", *call)
+        if not api.calls:
+            print("  nothing to do")
+    else:
+        print(f"{n} tickets created, updated or closed")
+    return 0
+
+
 def cmd_evaluate(args) -> int:
     with session_scope() as s:
         if args.all:
@@ -256,6 +288,13 @@ def main(argv: list[str] | None = None) -> int:
     a = sp.add_parser("rotate-key")
     a.add_argument("site_id", type=int)
 
+    p = sub.add_parser("halo", help="HaloPSA tickets: link a client, or sync now")
+    hp = p.add_subparsers(dest="action", required=True)
+    hp.add_parser("sync", help="create, update and close tickets now (a dry run unless BEARWATCH_HALO_DRY_RUN=false)")
+    a = hp.add_parser("client", help="set a client's HaloPSA client id")
+    a.add_argument("client_id", type=int)
+    a.add_argument("halo_id", help="the client's id in Halo, or 'none'")
+
     p = sub.add_parser("report", help="write a client's monthly report")
     p.add_argument("client_id", type=int)
     p.add_argument("--month", help="YYYY-MM; default: last month")
@@ -281,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         "site": cmd_site,
         "evaluate": cmd_evaluate,
         "report": cmd_report,
+        "halo": cmd_halo,
     }
     return handlers[args.cmd](args)
 

@@ -18,7 +18,7 @@ import threading
 import time
 from datetime import timedelta
 
-from . import findings, posture, scoring
+from . import findings, halo, posture, scoring
 from .db import init_db, session_scope
 from .intel.common import run_sync, utcnow
 from .jobs import JOBS
@@ -26,6 +26,7 @@ from .models import SyncState
 
 log = logging.getLogger("bearwatch.worker")
 DEVICE_TICK = 30
+HALO_TICK = 900  # HaloPSA tickets, on their own thread (docs/halo.md)
 FEED_TICK = 300
 ERROR_BACKOFF = timedelta(minutes=30)
 
@@ -74,6 +75,17 @@ def run_devices() -> None:
                 return
 
 
+def run_halo() -> None:
+    """Live ticket sync only. A dry run writes nothing; `bearwatch halo sync` shows what it would do."""
+    api = halo.api_from_settings()
+    if api is None or isinstance(api, halo.DryRunApi):
+        return
+    try:
+        run_sync("halo", lambda s: halo.sync(s, api))
+    except Exception:  # logged in run_sync
+        pass
+
+
 def feeds_loop(stop: threading.Event, tick: float = FEED_TICK) -> None:
     """Run due feed syncs now and then every `tick` seconds until `stop` is set."""
     while not stop.is_set():
@@ -90,16 +102,37 @@ def start_feeds(stop: threading.Event, tick: float = FEED_TICK) -> threading.Thr
     return t
 
 
+def halo_loop(stop: threading.Event, tick: float = HALO_TICK) -> None:
+    """Ticket syncs on their own thread: a slow or unreachable Halo (30 s per timed-out call)
+    must never hold up device evaluation."""
+    while not stop.is_set():
+        try:
+            run_halo()
+        except Exception:
+            log.exception("halo loop failed")
+        stop.wait(tick)
+
+
+def start_halo(stop: threading.Event, tick: float = HALO_TICK) -> threading.Thread:
+    t = threading.Thread(target=halo_loop, args=(stop, tick), name="halo", daemon=True)
+    t.start()
+    return t
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     init_db()
     log.info("worker started, jobs: %s", ", ".join(JOBS))
     feeds = start_feeds(threading.Event())
+    tickets = start_halo(threading.Event())
     while True:
         try:
             run_devices()
         except Exception:
             log.exception("device evaluation loop failed")
+        if not tickets.is_alive():
+            log.error("halo thread stopped; restarting it")
+            tickets = start_halo(threading.Event())
         if not feeds.is_alive():  # feeds_loop catches everything, so this should never happen
             log.error("feed thread stopped; restarting it")
             feeds = start_feeds(threading.Event())
