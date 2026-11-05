@@ -201,7 +201,7 @@ def cmd_halo(args) -> int:
             if c is None:
                 print(f"no client {args.client_id}", file=sys.stderr)
                 return 2
-            c.halo_client_id = None if args.halo_id == "none" else int(args.halo_id)
+            halo.set_mapping(s, c, None if args.halo_id == "none" else int(args.halo_id))
             print(f"{c.name}: Halo client id {c.halo_client_id}")
         return 0
     api = halo.api_from_settings()

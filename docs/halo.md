@@ -60,4 +60,5 @@ instance's own API reference at `https://<your instance>/apidoc` before turning 
 In particular, confirm the closed status id and the note outcome name used in your Halo.
 
 Changing a client's Halo client id moves its open BearWatch tickets to the new Halo client on the
-next pass. Clearing the id stops BearWatch managing them: they stay in Halo as they are.
+next pass. Clearing the id stops BearWatch managing them: they stay in Halo as they are. This
+works the same from the client page and from `bearwatch halo client`.

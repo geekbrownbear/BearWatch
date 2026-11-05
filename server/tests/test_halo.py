@@ -303,6 +303,17 @@ def test_changing_the_halo_client(session, monkeypatch):
         with db.session_scope() as s:
             assert halo.sync(s, api) == 1
         assert sent == [{**sent[0], "id": 700, "client_id": 56}]
+        # The CLI does the same.
+        assert cli(["halo", "client", str(client_id), "57"]) == 0
+        sent.clear()
+        with db.session_scope() as s:
+            assert halo.sync(s, api) == 1
+        assert sent == [{**sent[0], "id": 700, "client_id": 57}]
+        assert cli(["halo", "client", str(client_id), "none"]) == 0
+        with db.session_scope() as s:
+            assert s.scalars(select(HaloTicket)).one().status == "closed"
+            s.scalars(select(HaloTicket)).one().status = "open"
+        assert cli(["halo", "client", str(client_id), "56"]) == 0
         # Cleared: BearWatch lets go of the ticket and sends nothing more.
         assert web.post(f"/clients/{client_id}/halo", data={"halo_client_id": ""}, headers=ORIGIN, follow_redirects=False).status_code == 303
         sent.clear()

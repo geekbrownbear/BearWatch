@@ -321,7 +321,7 @@ pub fn scan() -> Payload {
     // Discovery, with the multicast name sweep running alongside it. Some devices (phones,
     // TVs, speakers) only answer multicast questions.
     let icmp = ping::icmp_available();
-    let local: Vec<Ipv4Addr> = nets.iter().map(|n| n.addr).collect();
+    let local: Vec<(Ipv4Addr, u8)> = nets.iter().map(|n| (n.addr, n.prefix)).collect();
     let (mut found, swept) = std::thread::scope(|s| {
         let sweeper = (!targets.is_empty()).then(|| s.spawn(|| names::sweep(&targets, &local, SWEEP_WAIT)));
         let found = pool(targets.len(), MAX_THREADS, |i| discover(targets[i], &nets, icmp));

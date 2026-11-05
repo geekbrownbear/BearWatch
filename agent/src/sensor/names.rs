@@ -178,23 +178,23 @@ pub enum SweepKind {
 }
 
 /// Multicast mDNS + SSDP sweep for the `targets` that lie in one of this
-/// computer's networks (`local_addrs` = our address in each network).
+/// computer's networks (`local_nets` = our address in each network and the
+/// prefix scanned there).
 ///
 /// Sends at most a few dozen small packets, listens for `wait`, then fetches
 /// UPnP descriptions from the devices that answered (8 at a time).
-pub fn sweep(targets: &[Ipv4Addr], local_addrs: &[Ipv4Addr], wait: Duration) -> Vec<(Ipv4Addr, SweepKind, String)> {
+pub fn sweep(targets: &[Ipv4Addr], local_nets: &[(Ipv4Addr, u8)], wait: Duration) -> Vec<(Ipv4Addr, SweepKind, String)> {
     let wanted: std::collections::HashSet<Ipv4Addr> = targets.iter().copied().collect();
     let mut found: Vec<(Ipv4Addr, SweepKind, String)> = Vec::new();
     let mut locations: HashMap<Ipv4Addr, (u16, String)> = HashMap::new();
 
     // One socket per local address, so multicast leaves on the right interface.
     let mut socks = Vec::new();
-    for &local in local_addrs {
+    for &(local, prefix) in local_nets {
         let Some(sock) = multicast_socket(local) else { continue };
-        // mDNS: reverse (PTR) questions for our targets, 40 per packet.
-        let mine: Vec<Ipv4Addr> =
-            targets.iter().copied().filter(|t| same_24(*t, local) || targets.len() <= 1024).collect();
-        for chunk in mine.chunks(40) {
+        // mDNS: reverse (PTR) questions for the targets on this interface's network, 40 per
+        // packet. Multicast stays on the link, so asking about other networks would be wasted.
+        for chunk in on_network(targets, local, prefix).chunks(40) {
             let _ =
                 sock.send_to(&multi_ptr_query(chunk, 0x5055), SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353));
         }
@@ -251,8 +251,11 @@ pub fn sweep(targets: &[Ipv4Addr], local_addrs: &[Ipv4Addr], wait: Duration) -> 
     found
 }
 
-fn same_24(a: Ipv4Addr, b: Ipv4Addr) -> bool {
-    a.octets()[..3] == b.octets()[..3]
+/// The targets in the `/prefix` network that holds `local`.
+fn on_network(targets: &[Ipv4Addr], local: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(prefix.min(32))) };
+    let net = u32::from(local) & mask;
+    targets.iter().copied().filter(|t| u32::from(*t) & mask == net).collect()
 }
 
 /// UDP socket bound to `local`, sending multicast out of that interface.
@@ -610,6 +613,16 @@ pub fn fuzz_entry(b: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multicast_questions_follow_the_scanned_network() {
+        let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let targets = [ip("10.0.0.5"), ip("10.0.3.50"), ip("10.0.4.1"), ip("192.168.3.9")];
+        // A /22 covers 10.0.0.0 to 10.0.3.255, so 10.0.3.50 is asked about from 10.0.0.2.
+        assert_eq!(on_network(&targets, ip("10.0.0.2"), 22), [ip("10.0.0.5"), ip("10.0.3.50")]);
+        assert_eq!(on_network(&targets, ip("10.0.0.2"), 24), [ip("10.0.0.5")]);
+        assert_eq!(on_network(&targets, ip("192.168.0.2"), 22), [ip("192.168.3.9")]);
+    }
 
     #[test]
     fn sanitize_strips_dangerous_chars() {
