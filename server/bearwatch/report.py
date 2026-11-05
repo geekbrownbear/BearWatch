@@ -258,6 +258,9 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
         return CheckItem(title, "pass", ok)
 
     known_late = any(g.get("exploited_late") for g in fixes.values())
+    # A PC with no inventory yet, or whose last evaluation hit an error (no Microsoft data for its
+    # build, say), has not had its vulnerabilities measured: it can't help this item pass.
+    unevaluated = [d.hostname for d in devs if d.last_match_at is None or d.match_error]
     r.checklist = [
         setting(["av-unhealthy"], "Antivirus is on and up to date", "On and up to date on every workstation.",
                 "Off or out of date on {workstations}.", workstations_only=True),
@@ -272,8 +275,9 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
                   else f"Support dates are unknown for {plural(len(unknown_support), 'PC')}." if unknown_support
                   else "Every PC still gets security updates." if ids else "No PCs report to BearWatch yet."),
         CheckItem("Known exploited vulnerabilities are fixed within 14 days",
-                  "fail" if known_late else ("pass" if ids else "unknown"),
+                  "fail" if known_late else ("unknown" if unevaluated or not ids else "pass"),
                   "Some are past their 14-day deadline." if known_late
+                  else f"Not checked yet on {plural(len(unevaluated), 'PC')}." if unevaluated
                   else "None are past their deadline." if ids else "No PCs report to BearWatch yet."),
         CheckItem("Every PC is monitored", "fail" if r.silent else ("pass" if ids else "unknown"),
                   f"{plural(len(r.silent), 'PC')} {'has' if len(r.silent) == 1 else 'have'} not checked in for a day." if r.silent
