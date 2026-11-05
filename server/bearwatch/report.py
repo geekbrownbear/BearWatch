@@ -73,6 +73,7 @@ class Report:
     settings: list[dict] = field(default_factory=list)
     network: dict = field(default_factory=dict)
     network_issues: list[dict] = field(default_factory=list)
+    settings_checked: int = 0  # PCs whose settings could be judged at all
     checklist: list[CheckItem] = field(default_factory=list)
     score: int = 100
     grade: str = "A"
@@ -142,6 +143,8 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
         g["risk"] = max(g["risk"], f.risk or 0.0)
         if f.due_at is not None and f.due_at < now and f.exception_id is None:
             g["overdue"] = True
+            if f.exploit_tier == 1:
+                g["exploited_late"] = True
     r.open_fixes = len(fixes)
     r.exploited_fixes = sum(1 for g in fixes.values() if g["tier"] == 1)
     r.overdue_fixes = sum(1 for g in fixes.values() if g["overdue"])
@@ -198,11 +201,14 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
 
     # Network (sensor).
     sites = list(s.scalars(select(Site).where(Site.client_id == client_id)))
-    has_sensor = any(site.sensor_device_id and site.sensor_scan_at for site in sites)
+    scanned = [site for site in sites if site.sensor_device_id and site.sensor_scan_at]
+    has_sensor = bool(scanned)
+    unscanned = [site.name for site in sites if site not in scanned]
     hosts = s.execute(select(NetworkHost, Site).join(Site, Site.id == NetworkHost.site_id)
                       .where(Site.client_id == client_id, NetworkHost.last_seen >= now - timedelta(days=30))).all()
     r.network = {
         "sensor": has_sensor,
+        "unscanned": unscanned,
         "hosts": len(hosts),
         "unmanaged": sum(1 for h, _ in hosts if h.device_id is None),
         "new": sum(1 for h, site in hosts if sensor.is_new(h, site, now)),
@@ -222,6 +228,8 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     judged = {d.id: ({x.rule.id: x.status for x in posture.evaluate(rs, d.posture.get("values", {}), d.is_server,
                                                                      posture.build_number(d.os_build))}
                      if d.posture is not None else None) for d in devs}
+
+    r.settings_checked = sum(1 for d in devs if judged[d.id] and any(v != "unknown" for v in judged[d.id].values()))
 
     def setting(rules: list[str], title: str, ok: str, bad: str, workstations_only: bool = False) -> CheckItem:
         if not ids:
@@ -249,7 +257,7 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
             return CheckItem(title, "unknown", f"Passes on {plural(passes, 'PC')}; {plural(unknown, 'PC')} not checked yet.")
         return CheckItem(title, "pass", ok)
 
-    known_late = any(g["overdue"] and g["tier"] == 1 for g in fixes.values())
+    known_late = any(g.get("exploited_late") for g in fixes.values())
     r.checklist = [
         setting(["av-unhealthy"], "Antivirus is on and up to date", "On and up to date on every workstation.",
                 "Off or out of date on {workstations}.", workstations_only=True),
@@ -271,9 +279,10 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
                   f"{plural(len(r.silent), 'PC')} {'has' if len(r.silent) == 1 else 'have'} not checked in for a day." if r.silent
                   else "Every PC checked in within the last day." if ids else "No PCs report to BearWatch yet."),
         CheckItem("No unsafe services on the office network",
-                  ("fail" if serious_net else "pass") if has_sensor else "unknown",
-                  (f"{plural(serious_net, 'serious issue')} found." if serious_net else "None found in the last scan.")
-                  if has_sensor else "No network sensor at this office yet."),
+                  "fail" if serious_net else ("unknown" if unscanned or not sites else "pass"),
+                  f"{plural(serious_net, 'serious issue')} found." if serious_net
+                  else (f"No network scan yet at {', '.join(unscanned)}." if has_sensor else "No network sensor at this office yet.")
+                  if unscanned or not sites else "None found in the last scan."),
     ]
 
     # The grade. Items already counted above (Windows support, silent PCs, exploited updates) are

@@ -160,7 +160,9 @@
   <thead><tr><th>Setting</th><th class="num">PCs</th></tr></thead>
   <tbody>{% for x in r.settings[:8] %}<tr><td>{{ x.title }}</td><td class="num">{{ x.devices }}</td></tr>{% endfor %}</tbody>
 </table>
-{% else %}<p>Every PC passes the settings checks.</p>{% endif %}
+{% elif r.devices and r.settings_checked == r.devices %}<p>Every PC passes the settings checks.</p>
+{% elif r.settings_checked %}<p>No problems found on the {{ r.settings_checked }} PCs checked. {{ r.devices - r.settings_checked }} not checked yet.</p>
+{% else %}<p class="muted">Not checked yet. The agents on these PCs need an update first.</p>{% endif %}
 </div>
 <div>
 <h2>Your office network</h2>
