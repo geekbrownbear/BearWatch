@@ -294,7 +294,7 @@ fn mysql_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
         svc.inconclusive = true;
         return;
     };
-    let pkt = read_some(&mut s, 512, ctx.timeout);
+    let pkt = read_until(&mut s, 512, ctx.timeout, mysql_complete);
     // Packet: 3-byte length, 1-byte sequence, then protocol version 10 and a NUL-terminated
     // server version. 0xFF = error packet (e.g. "host not allowed"), still MySQL/MariaDB.
     match pkt.get(4) {
@@ -319,7 +319,7 @@ fn redis_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
         svc.inconclusive = true;
         return;
     }
-    let reply = String::from_utf8_lossy(&read_some(&mut s, 8192, ctx.timeout)).into_owned();
+    let reply = String::from_utf8_lossy(&read_until(&mut s, 8192, ctx.timeout, redis_complete)).into_owned();
     if reply.contains("redis_version:") {
         svc.name = "redis";
         if let Some(v) = reply.lines().find_map(|l| l.strip_prefix("redis_version:")) {
@@ -340,7 +340,8 @@ fn vnc_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
         svc.inconclusive = true;
         return;
     };
-    let hello = read_some(&mut s, 12, ctx.timeout);
+    // "RFB 003.008\n": always exactly 12 bytes.
+    let hello = read_until(&mut s, 12, ctx.timeout, at_least(12));
     let Some(ver) = std::str::from_utf8(&hello).ok().filter(|v| v.starts_with("RFB ")) else {
         svc.inconclusive = true;
         return;
@@ -360,7 +361,7 @@ fn vnc_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
         svc.inconclusive = true;
         return;
     }
-    let reply = read_some(&mut s, 64, ctx.timeout);
+    let reply = read_until(&mut s, 64, ctx.timeout, vnc_types_complete(minor));
     let complete = if minor < 7 { reply.len() >= 4 } else { !reply.is_empty() };
     if !complete {
         svc.inconclusive = true;
@@ -387,7 +388,7 @@ fn memcached_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCt
         svc.inconclusive = true;
         return;
     }
-    let reply = String::from_utf8_lossy(&read_some(&mut s, 256, ctx.timeout)).into_owned();
+    let reply = String::from_utf8_lossy(&read_until(&mut s, 256, ctx.timeout, has_newline)).into_owned();
     if let Some(v) = reply.strip_prefix("VERSION ") {
         svc.name = "memcached";
         svc.products.push(Product::new("memcached", v.trim(), None));
@@ -408,7 +409,7 @@ fn mqtt_probe(svc: &mut Service, findings: &mut Vec<Finding>, ctx: &ProbeCtx) {
         svc.inconclusive = true;
         return;
     }
-    let ack = read_some(&mut s, 4, ctx.timeout);
+    let ack = read_until(&mut s, 4, ctx.timeout, at_least(4));
     // CONNACK: 0x20, length 2, flags, return code.
     if ack.first() != Some(&0x20) || ack.len() < 4 {
         svc.inconclusive = true;
@@ -563,29 +564,64 @@ fn connect(ip: Ipv4Addr, port: u16, timeout: Duration) -> Option<TcpStream> {
     Some(s)
 }
 
-/// Read up to `max` bytes, waiting at most about `timeout * 2` in total.
-fn read_some(s: &mut TcpStream, max: usize, timeout: Duration) -> Vec<u8> {
+/// Read until `done` says the reply is complete, `max` bytes have arrived, the peer closes, or
+/// about `timeout * 2` has passed in total. A reply split over several TCP segments is put
+/// back together; only a deadline or close before `done` leaves it short, which the probe
+/// then reports as inconclusive.
+fn read_until(s: &mut TcpStream, max: usize, timeout: Duration, done: impl Fn(&[u8]) -> bool) -> Vec<u8> {
     let deadline = Instant::now() + timeout * 2;
     let mut out = Vec::new();
     let mut buf = [0u8; 2048];
-    while out.len() < max && Instant::now() < deadline {
+    while out.len() < max && !done(&out) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || s.set_read_timeout(Some(left.max(Duration::from_millis(1)))).is_err() {
+            break;
+        }
         match s.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => {
-                out.extend_from_slice(&buf[..n.min(max - out.len())]);
-                // Most probes get their whole answer in one packet.
-                if n < buf.len() {
-                    break;
-                }
-            }
+            Ok(n) => out.extend_from_slice(&buf[..n.min(max - out.len())]),
         }
     }
     out
 }
 
+/// At least `n` bytes.
+fn at_least(n: usize) -> impl Fn(&[u8]) -> bool {
+    move |b| b.len() >= n
+}
+
+/// A whole line.
+fn has_newline(b: &[u8]) -> bool {
+    b.contains(&b'\n')
+}
+
+/// A complete RESP reply: a bulk string (`$<len>` CRLF, data, CRLF), or any other reply type
+/// up to its first CRLF (`+OK`, `-NOAUTH ...`).
+fn redis_complete(b: &[u8]) -> bool {
+    let Some(end) = b.windows(2).position(|w| w == b"\r\n") else { return false };
+    if b.first() != Some(&b'$') {
+        return true;
+    }
+    match std::str::from_utf8(&b[1..end]).ok().and_then(|n| n.parse::<i64>().ok()) {
+        Some(len) if len >= 0 => b.len() >= end + 2 + len as usize + 2,
+        _ => true, // null bulk ("$-1") or not a number: nothing more is coming
+    }
+}
+
+/// A complete MySQL packet: 3-byte little-endian payload length, sequence number, payload.
+fn mysql_complete(b: &[u8]) -> bool {
+    b.len() >= 4 && b.len() >= 4 + (usize::from(b[0]) | (usize::from(b[1]) << 8) | (usize::from(b[2]) << 16))
+}
+
+/// The RFB security-types message: 3.3 sends one 4-byte type; 3.7+ sends a count, then
+/// that many types (a count of 0 is followed by a failure reason we do not need).
+fn vnc_types_complete(minor: u32) -> impl Fn(&[u8]) -> bool {
+    move |b| if minor < 7 { b.len() >= 4 } else { b.first().is_some_and(|&n| b.len() > usize::from(n)) }
+}
+
 /// First non-empty line the service sends by itself.
 fn read_line(s: &mut TcpStream, timeout: Duration) -> Option<String> {
-    let data = read_some(s, 1024, timeout);
+    let data = read_until(s, 1024, timeout, has_newline);
     let line = data.split(|&b| b == b'\n' || b == b'\r').find(|l| !l.is_empty())?;
     let text = clean(&String::from_utf8_lossy(line), 160);
     (!text.is_empty()).then_some(text)
@@ -596,13 +632,13 @@ fn ftp_reply(s: &mut TcpStream, timeout: Duration) -> Option<String> {
     let deadline = Instant::now() + timeout * 3;
     let mut text = String::new();
     while Instant::now() < deadline && text.len() < 4096 {
-        let chunk = read_some(s, 1024, timeout);
+        let chunk = read_until(s, 1024, timeout, |b| b.ends_with(b"\n"));
         if chunk.is_empty() {
             break;
         }
         text.push_str(&String::from_utf8_lossy(&chunk));
-        // Finished when the last line is "ddd text" (code followed by a space).
-        let done = text.lines().last().is_some_and(|last| last.len() >= 4 && last.as_bytes()[..3].iter().all(u8::is_ascii_digit) && last.as_bytes()[3] == b' ');
+        // Finished when the last line is complete and "ddd text" (code followed by a space).
+        let done = text.ends_with('\n') && text.lines().last().is_some_and(|last| last.len() >= 4 && last.as_bytes()[..3].iter().all(u8::is_ascii_digit) && last.as_bytes()[3] == b' ');
         if done {
             break;
         }
@@ -818,5 +854,121 @@ mod tests {
         t.join().unwrap();
         assert!(!svc.inconclusive && findings.is_empty());
         assert_eq!(svc.name, "redis");
+    }
+
+    /// A loopback server that answers the probe's first request with `parts`, pausing 50 ms
+    /// between them, so the reply arrives in separate TCP reads.
+    fn split_server(parts: &'static [&'static [u8]]) -> (u16, std::thread::JoinHandle<()>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_nodelay(true).unwrap();
+            let mut b = [0u8; 256];
+            let _ = s.read(&mut b);
+            for (i, part) in parts.iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                s.write_all(part).unwrap();
+                s.flush().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        (port, t)
+    }
+
+    #[test]
+    fn mqtt_connack_split_across_reads() {
+        let ctx = ProbeCtx::new(Duration::from_millis(500));
+        let (port, t) = split_server(&[b"\x20", b"\x02\x00\x00"]);
+        let (svc, f) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Mqtt, &ctx);
+        t.join().unwrap();
+        assert!(!svc.inconclusive);
+        assert_eq!(svc.name, "mqtt");
+        assert!(f.iter().any(|x| x.check.id == "PIS-0008"));
+    }
+
+    #[test]
+    fn redis_reply_split_across_reads() {
+        let ctx = ProbeCtx::new(Duration::from_millis(500));
+        let (port, t) = split_server(&[b"$60\r\n# Ser", b"ver\r\nredis_version:7.4.1\r\nredis_mode:", b"standalone\r\n\r\n"]);
+        let (svc, f) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Redis, &ctx);
+        t.join().unwrap();
+        assert!(!svc.inconclusive);
+        assert_eq!(f[0].check.id, "PIS-0003");
+        assert!(f.iter().any(|x| x.evidence == "Redis 7.4.1"));
+        // An error reply split mid-line is still read whole: checked and safe.
+        let (port, t) = split_server(&[b"-NOAU", b"TH Authentication required.\r\n"]);
+        let (svc, f) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Redis, &ctx);
+        t.join().unwrap();
+        assert!(!svc.inconclusive && f.is_empty());
+    }
+
+    #[test]
+    fn mysql_and_vnc_split_across_reads() {
+        let ctx = ProbeCtx::new(Duration::from_millis(500));
+        // MySQL greets first: header, then the payload ("\x0a" protocol 10, version, NUL, ...).
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_nodelay(true).unwrap();
+            let payload = b"\x0a8.0.36\x00rest-of-handshake";
+            s.write_all(&[payload.len() as u8, 0, 0, 0]).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            s.write_all(payload).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        let (svc, f) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Mysql, &ctx);
+        t.join().unwrap();
+        assert!(!svc.inconclusive);
+        assert!(f.iter().any(|x| x.check.id == "PIS-0014"));
+        // VNC: the version line in two pieces, then a split security-type list offering None.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_nodelay(true).unwrap();
+            s.write_all(b"RFB 003").unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            s.write_all(b".008\n").unwrap();
+            let mut b = [0u8; 12];
+            let _ = s.read_exact(&mut b);
+            s.write_all(&[2, 2]).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            s.write_all(&[1]).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        let (svc, f) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Vnc, &ctx);
+        t.join().unwrap();
+        assert!(!svc.inconclusive);
+        assert!(f.iter().any(|x| x.check.id == "PIS-0004"));
+    }
+
+    /// A reply cut short by the peer closing is still inconclusive.
+    #[test]
+    fn short_reply_then_close_is_inconclusive() {
+        let ctx = ProbeCtx::new(Duration::from_millis(500));
+        let (port, t) = split_server(&[b"\x20\x02"]);
+        let (svc, f) = probe_as(Ipv4Addr::LOCALHOST, port, Plan::Mqtt, &ctx);
+        t.join().unwrap();
+        assert!(svc.inconclusive && f.is_empty());
+    }
+
+    #[test]
+    fn completion_rules() {
+        assert!(!redis_complete(b"$12\r\nredis_ver"));
+        assert!(redis_complete(b"$12\r\nredis_versio\r\n"));
+        assert!(!redis_complete(b"-NOAUTH Auth"));
+        assert!(redis_complete(b"-NOAUTH Authentication required.\r\n"));
+        assert!(redis_complete(b"$-1\r\n"));
+        assert!(!mysql_complete(&[5, 0, 0, 0, 10, 1]));
+        assert!(mysql_complete(&[2, 0, 0, 0, 10, 0]));
+        assert!(!mysql_complete(&[2, 0]));
+        assert!(!vnc_types_complete(8)(&[2, 1]));
+        assert!(vnc_types_complete(8)(&[2, 1, 2]));
+        assert!(vnc_types_complete(8)(&[0]));
+        assert!(vnc_types_complete(3)(&[0, 0, 0, 2]));
     }
 }
