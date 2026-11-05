@@ -1,15 +1,20 @@
 """Long-running worker for the Compose `worker` service.
 
-Two loops on one timer:
-- every 30 s, evaluate devices whose inventory changed (or whose findings need a refresh),
-  rescore findings whose exception has ended, and queue every device again if the posture
-  rules changed since the last deploy;
-- every 5 min, run any feed sync whose last success is older than its interval, then queue
-  every device for re-evaluation so new CVEs and KEV listings reach findings without waiting
-  for the agent. A failing feed backs off so it never blocks the others.
+Two loops on separate threads, so a long feed sync never holds up devices:
+- devices (main thread), every 30 s: evaluate devices whose inventory changed (or whose
+  findings need a refresh), rescore findings whose exception has ended, and queue every device
+  again if the posture rules changed since the last deploy;
+- feeds (background thread), every 5 min: run any feed sync whose last success is older than
+  its interval, then queue every device for re-evaluation so new CVEs and KEV listings reach
+  findings without waiting for the agent. A failing feed backs off so it never blocks the
+  others.
+
+The first NVD sync takes over an hour. Before the split, a PC enrolled during it showed no
+findings, not even its posture ones, until the sync ended.
 """
 
 import logging
+import threading
 import time
 from datetime import timedelta
 
@@ -69,19 +74,35 @@ def run_devices() -> None:
                 return
 
 
+def feeds_loop(stop: threading.Event, tick: float = FEED_TICK) -> None:
+    """Run due feed syncs now and then every `tick` seconds until `stop` is set."""
+    while not stop.is_set():
+        try:
+            run_feeds()
+        except Exception:
+            log.exception("feed loop failed")
+        stop.wait(tick)
+
+
+def start_feeds(stop: threading.Event, tick: float = FEED_TICK) -> threading.Thread:
+    t = threading.Thread(target=feeds_loop, args=(stop, tick), name="feeds", daemon=True)
+    t.start()
+    return t
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     init_db()
     log.info("worker started, jobs: %s", ", ".join(JOBS))
-    last_feeds = 0.0
+    feeds = start_feeds(threading.Event())
     while True:
-        if time.monotonic() - last_feeds >= FEED_TICK or last_feeds == 0.0:
-            run_feeds()
-            last_feeds = time.monotonic()
         try:
             run_devices()
         except Exception:
             log.exception("device evaluation loop failed")
+        if not feeds.is_alive():  # feeds_loop catches everything, so this should never happen
+            log.error("feed thread stopped; restarting it")
+            feeds = start_feeds(threading.Event())
         time.sleep(DEVICE_TICK)
 
 
