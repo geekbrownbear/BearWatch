@@ -131,10 +131,11 @@ def _dmarc_tags(record: str) -> dict[str, str]:
     return {k.strip().lower(): v.strip().lower() for k, _, v in (p.partition("=") for p in record.split(";")) if k.strip()}
 
 
-def _dmarc(http: httpx.Client, domain: str) -> tuple[str | None, str | None, str | None]:
-    """The DMARC record that applies to domain: (record, where it was found, policy). A
+def _dmarc(http: httpx.Client, domain: str) -> tuple[list[str], str | None, str | None]:
+    """The DMARC records that apply to domain: (records, where they were found, policy). A
     subdomain with no record of its own is covered by its parent's, which uses sp= for
-    subdomains when set (RFC 7489 6.6.3; the parent is found by walking up the name)."""
+    subdomains when set (RFC 7489 6.6.3; the parent is found by walking up the name). More than
+    one record means no DMARC applies, so callers must check the count."""
     labels = domain.split(".")
     for i in range(len(labels) - 1):
         name = ".".join(labels[i:])
@@ -142,8 +143,8 @@ def _dmarc(http: httpx.Client, domain: str) -> tuple[str | None, str | None, str
         if recs:
             tags = _dmarc_tags(recs[0])
             policy = tags.get("p") if i == 0 else (tags.get("sp") or tags.get("p"))
-            return recs[0], f"_dmarc.{name}", policy
-    return None, None, None
+            return recs, f"_dmarc.{name}", policy
+    return [], None, None
 
 
 def check_domain(http: httpx.Client, domain: str, cert_days_left=None) -> tuple[dict, list[Found]]:
@@ -161,12 +162,15 @@ def check_domain(http: httpx.Client, domain: str, cert_days_left=None) -> tuple[
         found.append(Found("spf-allows-all", "The SPF record allows any server to send email", "high",
                            f"{domain}: {spf[0][:200]}", "End the SPF record with -all or ~all instead of +all."))
     dmarc, where, policy = _dmarc(http, domain)
-    if dmarc is None:
+    if not dmarc:
         found.append(Found("dmarc-missing", "No DMARC record, so spoofed email is not blocked", "medium",
                            f"_dmarc.{domain} has no DMARC record.", "Add a DMARC record. Start with p=none to collect reports, then move to quarantine."))
+    elif len(dmarc) > 1:
+        found.append(Found("dmarc-multiple", "The domain has more than one DMARC record, so mail servers ignore DMARC", "medium",
+                           f"{where} has {len(dmarc)} DMARC records.", "Combine them into one DMARC record."))
     elif policy == "none":
         found.append(Found("dmarc-monitor-only", "DMARC only monitors, so spoofed email still gets through", "low",
-                           f"{where}: {dmarc[:200]}", "Move the DMARC policy to p=quarantine or p=reject once reports look clean."))
+                           f"{where}: {dmarc[0][:200]}", "Move the DMARC policy to p=quarantine or p=reject once reports look clean."))
     if not ad:
         found.append(Found("dnssec-off", "DNSSEC is not turned on", "low", f"{domain} answers without DNSSEC validation.",
                            "Turn on DNSSEC at the DNS host and add the DS record at the registrar."))
@@ -178,7 +182,7 @@ def check_domain(http: httpx.Client, domain: str, cert_days_left=None) -> tuple[
         elif days < 14:
             found.append(Found("cert-expiring", "The website certificate expires within two weeks", "high",
                                f"https://{domain}: {days} days left.", "Renew the certificate, or check why automatic renewal stopped."))
-    return {"spf": spf[:2], "dmarc": [dmarc] if dmarc else [], "dmarc_from": where, "dnssec": ad, "cert_days_left": days}, found
+    return {"spf": spf[:2], "dmarc": dmarc[:2], "dmarc_from": where, "dnssec": ad, "cert_days_left": days}, found
 
 
 def cert_days(domain: str, timeout: float = 10.0) -> int | None:

@@ -267,5 +267,19 @@ def sync(s: Session, api) -> int:
     return touched
 
 
+def set_mapping(s: Session, client: Client, halo_client_id: int | None) -> None:
+    """Link a client to a Halo client, or unlink it. Open tickets follow a changed id on the next
+    pass (their digest is cleared so the update is sent). Unlinking stops BearWatch managing the
+    open tickets; they stay in Halo as they are."""
+    if halo_client_id != client.halo_client_id:
+        now = utcnow()
+        for row in s.scalars(select(HaloTicket).where(HaloTicket.client_id == client.id, HaloTicket.status == "open")):
+            if halo_client_id is None:
+                row.status, row.closed_at, row.updated_at = "closed", now, now
+            else:
+                row.digest = ""
+    client.halo_client_id = halo_client_id
+
+
 def open_count(s: Session, client_id: int) -> int:
     return s.scalar(select(func.count()).select_from(HaloTicket).where(HaloTicket.client_id == client_id, HaloTicket.status == "open")) or 0

@@ -163,6 +163,11 @@ def test_dmarc_is_inherited_and_two_spf_records_fail(session):
         assert {f.check_id for f in found} == {"spf-multiple"}
         _, found = external.check_domain(http, "example.com", cert_days_left=lambda d: 90)
         assert found == []
+        # Two DMARC records: receivers apply neither, so it is as bad as none.
+        records["_dmarc.example.com"] = ["v=DMARC1; p=reject", "v=DMARC1; p=quarantine"]
+        snap, found = external.check_domain(http, "example.com", cert_days_left=lambda d: 90)
+        assert {f.check_id for f in found} == {"dmarc-multiple"} and len(snap["dmarc"]) == 2
+        records["_dmarc.example.com"] = ["v=DMARC1; p=reject"]
 
     with db.session_scope() as s:
         c = tenants.create_client(s, "Lab")
