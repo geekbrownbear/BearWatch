@@ -23,7 +23,7 @@ from .. import __version__, auth, halo, lifecycle, posture, report, scoring, sen
 from ..config import get_settings
 from ..db import session_scope
 from ..intel.common import utcnow
-from ..models import (Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, NetworkHost, NetworkIssue, Site,
+from ..models import (Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, HaloTicket, NetworkHost, NetworkIssue, Site,
                       SyncState, WuaUpdate)
 
 HERE = Path(__file__).resolve().parent
@@ -262,7 +262,16 @@ def set_halo_client(request: Request, client_id: int, halo_client_id: str = Form
         raise HTTPException(400, "the Halo client id is a number")
     with session_scope() as s:
         client = s.get(Client, client_id) or _404()
-        client.halo_client_id = int(value) if value else None
+        new = int(value) if value else None
+        if new != client.halo_client_id:
+            now = utcnow()
+            for row in s.scalars(select(HaloTicket).where(HaloTicket.client_id == client_id, HaloTicket.status == "open")):
+                if new is None:
+                    # Unlinked: BearWatch stops managing these. The tickets stay in Halo as they are.
+                    row.status, row.closed_at, row.updated_at = "closed", now, now
+                else:
+                    row.digest = ""  # rewritten on the next pass, with the new client id
+        client.halo_client_id = new
     return RedirectResponse(f"/clients/{client_id}", 303)
 
 

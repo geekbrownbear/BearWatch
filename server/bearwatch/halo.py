@@ -138,8 +138,9 @@ class Group:
 
     @property
     def digest(self) -> str:
-        """Everything the ticket shows: a change in any of it rewrites the ticket."""
-        parts = ([self.label, "#"] + [str(i) for i in sorted(self.devices)] + ["#"] + self.cves
+        """Everything the ticket shows: a change in any of it rewrites the ticket. PCs are keyed
+        by id, with the name shown, so a renamed PC updates the list too."""
+        parts = ([self.label, "#"] + [f"{i}={self.devices[i]}" for i in sorted(self.devices)] + ["#"] + self.cves
                  + ["#", str(self.tier), self.due.isoformat() if self.due else "-"])
         return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
@@ -236,8 +237,10 @@ def sync(s: Session, api) -> int:
                     row.status, row.closed_at = "closed", now
                     continue
                 elif row.digest != g.digest:
-                    # The summary names the target version, which changes with each new release.
-                    api.update_ticket(row.halo_id, {"summary": _summary(g), "details": _details(g, client, cfg.public_url)})
+                    # The summary names the target version, which changes with each new release. The
+                    # client goes along too, so a corrected Halo client id moves the ticket.
+                    api.update_ticket(row.halo_id, {"summary": _summary(g), "details": _details(g, client, cfg.public_url),
+                                                    "client_id": client.halo_client_id})
                     api.add_note(row.halo_id, f"BearWatch: the list changed. {len(g.devices)} "
                                               f"{'PC still needs' if len(g.devices) == 1 else 'PCs still need'} this fix.",
                                  cfg.halo_note_outcome)

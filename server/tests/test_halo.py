@@ -258,3 +258,55 @@ def test_codex_review_cases(session, monkeypatch):
         halo.sync(s, api)
         row = s.scalars(select(HaloTicket).where(HaloTicket.fix_key == "kb:2")).one()
         assert row.status == "open" and row.halo_id == 501
+
+    # A PC is renamed: same ids, but the ticket shows the new name.
+    sent.clear()
+    with db.session_scope() as s:
+        s.scalars(select(Device).where(Device.machine_guid == "e" * 32)).one().hostname = "PC-C"
+        assert halo.sync(s, api) == 1
+    assert "PC-C (Branch)" in sent[0]["details"] and "PC-A (Branch)" not in sent[0]["details"]
+
+
+@respx.mock
+def test_changing_the_halo_client(session, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from bearwatch.api import app
+
+    from .test_web import ORIGIN, _sign_in
+
+    _settings(monkeypatch, BEARWATCH_HALO_DRY_RUN="false")
+    respx.post(f"{HALO}/auth/token").mock(return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}))
+    sent = []
+
+    def on_tickets(request):
+        body = json.loads(request.content)[0]
+        sent.append(body)
+        return httpx.Response(201, json={**body, "id": body.get("id") or 700})
+
+    respx.post(f"{HALO}/api/tickets").mock(side_effect=on_tickets)
+    respx.post(f"{HALO}/api/actions").mock(return_value=httpx.Response(201, json={"id": 1}))
+    respx.get(url__regex=rf"{HALO}/api/tickets/\d+").mock(return_value=httpx.Response(200, json={"status_id": 2}))
+    api = halo.api_from_settings()
+    with db.session_scope() as s:
+        c, devs = _setup(s, halo_id=55)
+        _finding(s, devs[0], "kb:9", "CVE-2026-7000", risk=60)
+        halo.sync(s, api)
+        client_id = c.id
+    assert sent[-1]["client_id"] == 55
+
+    with TestClient(app) as web:
+        _sign_in(web)
+        # A corrected id: the open ticket moves on the next pass.
+        assert web.post(f"/clients/{client_id}/halo", data={"halo_client_id": "56"}, headers=ORIGIN, follow_redirects=False).status_code == 303
+        sent.clear()
+        with db.session_scope() as s:
+            assert halo.sync(s, api) == 1
+        assert sent == [{**sent[0], "id": 700, "client_id": 56}]
+        # Cleared: BearWatch lets go of the ticket and sends nothing more.
+        assert web.post(f"/clients/{client_id}/halo", data={"halo_client_id": ""}, headers=ORIGIN, follow_redirects=False).status_code == 303
+        sent.clear()
+        with db.session_scope() as s:
+            assert halo.sync(s, api) == 0
+            assert s.scalars(select(HaloTicket)).one().status == "closed"
+        assert sent == []
