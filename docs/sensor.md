@@ -52,8 +52,9 @@ can't be matched by MAC.
 
 ## How issues open and close
 
-- An issue stays open until a scan reaches the device again and the check passes. Then it is
-  marked fixed.
+- An issue stays open until a scan reaches the device again and the check finishes and passes.
+  Then it is marked fixed. A check that times out or gets no clear answer (the agent lists that
+  port in `unchecked_ports`) leaves the issue open. A port that is no longer open counts as fixed.
 - A device that is switched off keeps its issues: no answer is not evidence of a fix.
 - A fixed issue that comes back reopens, and its age starts again.
 

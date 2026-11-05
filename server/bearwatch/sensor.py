@@ -14,6 +14,7 @@ again and the check passes; a host that is simply switched off keeps its issues.
 
 import re
 from datetime import datetime, timedelta
+from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import or_, select, update
@@ -60,6 +61,9 @@ class Host(BaseModel):
     rtt_ms: float | None = None
     ports: list[Port] = Field(default=[], max_length=200)
     issues: list[Issue] = Field(default=[], max_length=50)
+    # Ports where a check could not finish (timeout, refused, garbled reply). Issues there stay
+    # open: no answer is not evidence of a fix.
+    unchecked_ports: list[Annotated[int, Field(ge=1, le=65535)]] = Field(default=[], max_length=200)
 
     @field_validator("mac")
     @classmethod
@@ -155,7 +159,7 @@ def store(s: Session, site: Site, rep: Report) -> int:
         row.last_seen = now
         row.device_id = match_device(row, by_mac, by_name)
         s.flush()
-        _issues(s, row, h.issues, now)
+        _issues(s, row, h.issues, now, set(h.unchecked_ports))
     site.sensor_scan_at = now
     if site.sensor_first_scan_at is None:
         site.sensor_first_scan_at = now
@@ -163,8 +167,9 @@ def store(s: Session, site: Site, rep: Report) -> int:
     return len(seen)
 
 
-def _issues(s: Session, host: NetworkHost, found: list[Issue], now: datetime) -> None:
-    """The host was reached in this scan, so its checks ran: what is missing now is fixed."""
+def _issues(s: Session, host: NetworkHost, found: list[Issue], now: datetime, unchecked: set[int] = frozenset()) -> None:
+    """The host was reached in this scan. An open issue is fixed only if its check finished on
+    that port and found nothing; a port the agent could not check keeps its issues open."""
     rows = {(i.check_id, i.port): i for i in s.scalars(select(NetworkIssue).where(NetworkIssue.host_id == host.id))}
     current: set[tuple[str, int]] = set()
     for f in found:
@@ -181,7 +186,7 @@ def _issues(s: Session, host: NetworkHost, found: list[Issue], now: datetime) ->
         row.title, row.cvss, row.evidence, row.solution = f.title, f.cvss, f.evidence, f.solution
         row.status, row.last_seen, row.fixed_at = "open", now, None
     for k, row in rows.items():
-        if k not in current and row.status == "open":
+        if k not in current and row.status == "open" and row.port not in unchecked:
             row.status, row.fixed_at = "fixed", now
 
 
