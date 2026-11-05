@@ -223,3 +223,21 @@ def test_network_item_needs_every_site_scanned(session):
         html = report.render_html(rep)
     assert item.status == "unknown" and item.detail == "No network scan yet at Branch."
     assert "Every PC passes the settings checks" not in html
+
+
+def test_serious_network_issue_costs_points_once(session):
+    from bearwatch import sensor
+
+    now = utcnow()
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "Open Redis")
+        site, _ = tenants.create_site(s, c, "Office")
+        site.sensor_device_id = 1
+        sensor.store(s, site, sensor.Report.model_validate({
+            "agent_version": "0.3.0", "started_at": now.isoformat() + "Z", "duration_ms": 1,
+            "networks": [{"cidr": "10.0.0.0/24"}],
+            "hosts": [{"ip": "10.0.0.9", "ports": [{"port": 6379}],
+                       "issues": [{"id": "PIS-0003", "port": 6379, "title": "Redis open", "cvss": 9.3}]}]}))
+        rep = report.build(s, c.id, date(2026, 10, 1), now=now)
+    assert (10, "1 serious issue on the office network or open to the internet") in rep.deductions
+    assert not any("checklist" in t for _, t in rep.deductions)  # not counted twice

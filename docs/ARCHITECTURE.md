@@ -35,7 +35,8 @@ Windows endpoints                     Client site LAN                Internet
 | Sensor mode, unmanaged devices, network issues | **Phase 2, built** | `server/bearwatch/sensor.py`, `agent/src/sensor/`, [sensor.md](sensor.md) |
 | Monthly client report (PDF), Windows support dates | **Phase 3, built** | `server/bearwatch/report.py`, `lifecycle.py`, `intel/windows_lifecycle.toml`, [report.md](report.md) |
 | HaloPSA tickets (one per fix per client, auto-closed) | **Phase 3, built** | `server/bearwatch/halo.py`, [halo.md](halo.md) |
-| External monitoring | Phase 3 | |
+| External exposure (Shodan InternetDB, SPF, DMARC, DNSSEC, certificates), no scanning | **Phase 3, built** | `server/bearwatch/external.py`, [external.md](external.md) |
+| Active external scanning (nuclei, port sweeps) | Later: needs client permission | |
 
 ## Two matching paths, never mixed
 
@@ -167,7 +168,7 @@ server/                 Python package `bearwatch` + tests + Dockerfile
   bearwatch/web/        dashboard templates and static files
 agent/                  Rust agent, Dockerfile (cross-compile), build.ps1
 intel/                  curated data checked into git (cpe_overrides.json, posture_rules.toml, windows_lifecycle.toml)
-docs/                   this file, scoring.md, posture.md, sensor.md, report.md, halo.md
+docs/                   this file, scoring.md, posture.md, sensor.md, report.md, halo.md, external.md
 shared-scan/            (Phase 3) package extracted from Cyber Scan
 ```
 

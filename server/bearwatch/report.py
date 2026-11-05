@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from . import lifecycle, posture, scoring, sensor
 from .intel.common import utcnow
-from .models import Client, Device, Finding, FindingEvent, NetworkHost, NetworkIssue, Site
+from .models import Client, Device, ExternalIssue, ExternalTarget, Finding, FindingEvent, NetworkHost, NetworkIssue, Site
 
 SILENT = timedelta(hours=24)
 
@@ -24,6 +24,7 @@ PENALTIES = {
     "unsupported": (5, 15),  # a PC on a Windows version that no longer gets security updates
     "checklist": (5, 30),  # a failed item on the insurance readiness checklist
     "silent": (2, 10),  # a PC whose agent has not checked in for a day
+    "exposed": (10, 30),  # a critical or high issue on the office network or seen from the internet
 }
 GRADES = ((90, "A"), (80, "B"), (70, "C"), (60, "D"))
 
@@ -73,6 +74,7 @@ class Report:
     settings: list[dict] = field(default_factory=list)
     network: dict = field(default_factory=dict)
     network_issues: list[dict] = field(default_factory=list)
+    external: dict = field(default_factory=dict)
     settings_checked: int = 0  # PCs whose settings could be judged at all
     unevaluated: int = 0  # PCs whose updates have not been measured (no inventory yet, or no data for the build)
     fixes_note: str = ""  # shown when there are no fixes to list
@@ -259,6 +261,36 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
             return CheckItem(title, "unknown", f"Passes on {plural(passes, 'PC')}; {plural(unknown, 'PC')} not checked yet.")
         return CheckItem(title, "pass", ok)
 
+    # Seen from the internet (external.py).
+    # Every listed target counts. One that has never been checked successfully, or whose last
+    # check failed, is unverified: it can fail an item but never let it pass.
+    targets = s.scalars(select(ExternalTarget).where(ExternalTarget.client_id == client_id)).all()
+    t_ids = [t.id for t in targets]
+    ext_open = {(i.target_id, i.check_id) for i in s.scalars(select(ExternalIssue).where(ExternalIssue.target_id.in_(t_ids),
+                                                                                        ExternalIssue.status == "open"))} if t_ids else set()
+    ips = [t for t in targets if t.kind == "ip"]
+    domains = [t for t in targets if t.kind == "domain"]
+    remote_ports = {"port-3389", "port-445", "port-23", "port-5900", "port-135", "port-137", "port-139"}
+    exposed = sorted({t.value for t in ips if any((t.id, c) in ext_open for c in remote_ports)})
+    spoofable = sorted({t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-multiple", "spf-allows-all", "dmarc-missing"))})
+    # An SPF record that allows any server is a high issue, so it already costs points as a serious
+    # internet issue. The email item costs checklist points only for a domain missing SPF or DMARC.
+    spoof_unscored = [t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-multiple", "dmarc-missing"))]
+    unverified_ips = [t.value for t in ips if t.snapshot is None or t.last_error]
+    unverified_domains = [t.value for t in domains if t.snapshot is None or t.last_error]
+    r.external = {"ips": len(ips), "domains": len(domains), "exposed": exposed, "spoofable": spoofable}
+    serious_ext = sum(1 for i in s.scalars(select(ExternalIssue).where(ExternalIssue.target_id.in_(t_ids), ExternalIssue.status == "open",
+                                                                       ExternalIssue.severity.in_(("critical", "high"))))) if t_ids else 0
+
+    def ext_item(title: str, items: list, bad: list[str], unverified: list[str], bad_text: str, ok_text: str, none_text: str) -> CheckItem:
+        if bad:
+            return CheckItem(title, "fail", bad_text.format(", ".join(bad)))
+        if not items:
+            return CheckItem(title, "unknown", none_text)
+        if unverified:
+            return CheckItem(title, "unknown", f"Not checked yet: {', '.join(unverified)}.")
+        return CheckItem(title, "pass", ok_text)
+
     known_late = any(g.get("exploited_late") for g in fixes.values())
     # A PC with no inventory yet, or whose last evaluation hit an error (no Microsoft data for its
     # build, say), has not had its vulnerabilities measured: it can't help this item pass.
@@ -295,6 +327,10 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
         CheckItem("Every PC is monitored", "fail" if r.silent else ("pass" if ids else "unknown"),
                   f"{plural(len(r.silent), 'PC')} {'has' if len(r.silent) == 1 else 'have'} not checked in for a day." if r.silent
                   else "Every PC checked in within the last day." if ids else "No PCs report to BearWatch yet."),
+        ext_item("Remote access and file sharing are closed to the internet", ips, exposed, unverified_ips,
+                 "Open on {}.", f"Closed on {plural(len(ips), 'public address')}.", "No public addresses listed for this client yet."),
+        ext_item("Email is protected from spoofing (SPF and DMARC)", domains, spoofable, unverified_domains,
+                 "Missing for {}.", f"Set up for {plural(len(domains), 'domain')}.", "No email domains listed for this client yet."),
         CheckItem("No unsafe services on the office network",
                   "fail" if serious_net else ("unknown" if unscanned or not sites else "pass"),
                   f"{plural(serious_net, 'serious issue')} found." if serious_net
@@ -316,7 +352,13 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     take("overdue", n, f"{plural(n, 'update')} past the fix deadline")
     n = len(unsupported)
     take("unsupported", n, f"{plural(n, 'PC')} on a Windows version that no longer gets security updates")
-    fails = [c for c in r.checklist if c.status == "fail" and not c.title.startswith(("Every PC runs", "Every PC is", "Known exploited"))]
+    # Items already counted on their own (Windows support, silent PCs, exploited updates, serious
+    # network and internet issues) are left out here so nothing costs points twice.
+    n = serious_net + serious_ext
+    take("exposed", n, f"{plural(n, 'serious issue')} on the office network or open to the internet")
+    fails = [c for c in r.checklist if c.status == "fail" and not c.title.startswith(
+        ("Every PC runs", "Every PC is", "Known exploited", "No unsafe services", "Remote access"))
+        and not (c.title.startswith("Email is protected") and not spoof_unscored)]
     take("checklist", len(fails), f"{plural(len(fails), 'insurance checklist item')} not met")
     n = len(r.silent)
     take("silent", n, f"{plural(n, 'PC')} not checking in")
@@ -351,7 +393,12 @@ def pdf_available() -> bool:
 
 
 def render_pdf(r: Report) -> bytes:
+    import logging
+
     from weasyprint import HTML
+
+    for name in ("weasyprint", "fontTools"):  # page-by-page progress and font subsetting chatter
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     from .web import STATIC
 
