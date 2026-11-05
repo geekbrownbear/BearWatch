@@ -143,6 +143,40 @@ def test_pages_and_cli(session, capsys):
 
 
 @respx.mock
+def test_dmarc_is_inherited_and_two_spf_records_fail(session):
+    records = {"mail.example.com": ["v=spf1 -all", "v=spf1 include:x -all"], "example.com": ["v=spf1 -all"],
+               "_dmarc.example.com": ["v=DMARC1; p=reject; sp=none"]}
+
+    def handler(request):
+        name = request.url.params["name"]
+        answer = [{"name": name, "type": 16, "data": f'"{t}"'} for t in records.get(name, [])]
+        return httpx.Response(200, json={"Status": 0 if answer else 3, "AD": True, "Answer": answer})
+
+    respx.get(external.DOH).mock(side_effect=handler)
+    with httpx.Client() as http:
+        snap, found = external.check_domain(http, "mail.example.com", cert_days_left=lambda d: 90)
+        # No _dmarc.mail.example.com: the parent's record covers it, with its sp= policy.
+        assert {f.check_id for f in found} == {"spf-multiple", "dmarc-monitor-only"}
+        assert snap["dmarc_from"] == "_dmarc.example.com"
+        records["_dmarc.example.com"] = ["v=DMARC1; p=reject"]
+        _, found = external.check_domain(http, "mail.example.com", cert_days_left=lambda d: 90)
+        assert {f.check_id for f in found} == {"spf-multiple"}
+        _, found = external.check_domain(http, "example.com", cert_days_left=lambda d: 90)
+        assert found == []
+
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "Lab")
+        dom = ExternalTarget(client_id=c.id, kind="domain", value="mail.example.com", created_at=utcnow())
+        s.add(dom)
+        s.flush()
+        with httpx.Client() as http:
+            external.check(s, dom, http, cert_days_left=lambda d: 90)
+        r = report.build(s, c.id, date(2026, 10, 1))
+    email = next(i for i in r.checklist if i.title.startswith("Email is protected"))
+    assert email.status == "fail" and [p for p, _ in r.deductions] == [5]
+
+
+@respx.mock
 def test_open_spf_costs_points_once(session):
     with db.session_scope() as s:
         c = tenants.create_client(s, "Lab")

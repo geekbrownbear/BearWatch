@@ -272,10 +272,10 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     domains = [t for t in targets if t.kind == "domain"]
     remote_ports = {"port-3389", "port-445", "port-23", "port-5900", "port-135", "port-137", "port-139"}
     exposed = sorted({t.value for t in ips if any((t.id, c) in ext_open for c in remote_ports)})
-    spoofable = sorted({t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-allows-all", "dmarc-missing"))})
+    spoofable = sorted({t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-multiple", "spf-allows-all", "dmarc-missing"))})
     # An SPF record that allows any server is a high issue, so it already costs points as a serious
     # internet issue. The email item costs checklist points only for a domain missing SPF or DMARC.
-    spoof_unscored = [t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "dmarc-missing"))]
+    spoof_unscored = [t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-multiple", "dmarc-missing"))]
     unverified_ips = [t.value for t in ips if t.snapshot is None or t.last_error]
     unverified_domains = [t.value for t in domains if t.snapshot is None or t.last_error]
     r.external = {"ips": len(ips), "domains": len(domains), "exposed": exposed, "spoofable": spoofable}
