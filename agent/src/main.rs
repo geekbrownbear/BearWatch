@@ -7,6 +7,7 @@
 //!   bw-agent install | uninstall        register or remove the Windows service
 //!   bw-agent run-once [--wua] [--force] one check-in now (for testing or an RMM script)
 //!   bw-agent inventory [--reads FILE]    print what would be sent, plus resource use; no network
+//!   bw-agent sensor [--out FILE]         one network scan now, printed or saved; sends nothing
 //!   bw-agent service                     entry point used by the Service Control Manager
 
 mod client;
@@ -15,6 +16,7 @@ mod inventory;
 mod logger;
 mod posture;
 mod run;
+mod sensor;
 mod service;
 mod system;
 mod wua;
@@ -37,6 +39,9 @@ usage:
                               print the inventory as JSON with timing; sends nothing. Settings
                               come from the read list the server last sent, or from FILE (a
                               JSON list of reads, for testing posture rules)
+  bw-agent sensor [--out FILE]
+                              scan this PC's local networks now, as the site's sensor does, and
+                              write the result as JSON to FILE or the console; sends nothing
   bw-agent version";
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -57,6 +62,7 @@ fn main() -> ExitCode {
         "uninstall" => service::uninstall(),
         "run-once" => run::once(&config::path(config_path.as_deref()), has(&args, "--wua"), has(&args, "--force")),
         "inventory" => cmd_inventory(&args, config_path),
+        "sensor" => cmd_sensor(&args),
         "service" => service::dispatch(),
         "wua-scan" => cmd_wua_scan(),
         "version" | "--version" => {
@@ -122,5 +128,21 @@ fn cmd_inventory(args: &[String], config_path: Option<PathBuf>) -> Result<()> {
         json.len(),
         gz.len()
     );
+    Ok(())
+}
+
+fn cmd_sensor(args: &[String]) -> Result<()> {
+    std::env::set_var("BW_AGENT_CONSOLE", "1"); // progress lines to the console, not the log
+    let payload = sensor::scan();
+    let json = serde_json::to_string_pretty(&payload)?;
+    match flag(args, "--out") {
+        Some(file) => {
+            std::fs::write(&file, &json).map_err(|e| format!("cannot write {file}: {e}"))?;
+            eprintln!("wrote {file}");
+        }
+        None => println!("{json}"),
+    }
+    let gz = client::gzip(serde_json::to_vec(&payload)?.as_slice())?;
+    eprintln!("networks {}  hosts {}  duration {} ms  upload {} bytes gzip", payload.networks.len(), payload.hosts.len(), payload.duration_ms, gz.len());
     Ok(())
 }

@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timedelta
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from .intel.common import utcnow
@@ -228,9 +228,22 @@ def sensor_silent(site: Site, interval_minutes: int, now: datetime | None = None
     return now - site.sensor_scan_at > timedelta(minutes=2 * interval_minutes + 60)
 
 
+def is_issue(cvss: float | None) -> bool:
+    """Checks scored 0 are notes, not problems ("RDP reachable", "software version detected").
+    They are stored and shown with the host, but never counted as issues."""
+    return cvss is None or cvss > 0
+
+
+def issue_clause():
+    """SQL version of is_issue."""
+    return or_(NetworkIssue.cvss.is_(None), NetworkIssue.cvss > 0)
+
+
 def severity(cvss: float | None) -> str:
     if cvss is None:
         return "medium"
+    if cvss <= 0:
+        return "info"
     if cvss >= 9.0:
         return "critical"
     if cvss >= 7.0:

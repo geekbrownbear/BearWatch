@@ -1,5 +1,5 @@
-//! Agent state: server URL, device token, last uploaded hash, last Windows Update result, and
-//! the posture read list the server sent last.
+//! Agent state: server URL, device token, last uploaded hash, last Windows Update result, the
+//! posture read list the server sent last, and the sensor schedule.
 //!
 //! Lives in %ProgramData%\BearWatch\agent.json. The folder is locked to SYSTEM and
 //! Administrators, because the device token lets anyone holding it report for this PC.
@@ -27,6 +27,13 @@ pub struct Config {
     pub posture_hash: Option<String>,
     #[serde(default)]
     pub posture_reads: Vec<String>,
+    /// When the last sensor scan was started (unix seconds), whether or not it succeeded.
+    #[serde(default)]
+    pub sensor_last_scan: Option<u64>,
+    /// The server answered 409 to a sensor upload. No more scans until a heartbeat plan has come
+    /// without `sensor` and then asks again.
+    #[serde(default)]
+    pub sensor_declined: bool,
 }
 
 pub fn default_dir() -> PathBuf {

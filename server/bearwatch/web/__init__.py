@@ -178,7 +178,7 @@ def network_counts(s: Session, client_id: int | None = None, site_id: int | None
     now = utcnow()
     q = select(NetworkHost, Site).join(Site, Site.id == NetworkHost.site_id).where(NetworkHost.last_seen >= now - RECENT)
     iq = (select(func.count(NetworkIssue.id)).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
-          .join(Site, Site.id == NetworkHost.site_id).where(NetworkIssue.status == "open"))
+          .join(Site, Site.id == NetworkHost.site_id).where(NetworkIssue.status == "open", sensor.issue_clause()))
     if client_id is not None:
         q, iq = q.where(Site.client_id == client_id), iq.where(Site.client_id == client_id)
     if site_id is not None:
@@ -292,7 +292,7 @@ def device_page(request: Request, device_id: int, user: str = Depends(auth.curre
         events = s.execute(select(FindingEvent, Finding).join(Finding, Finding.id == FindingEvent.finding_id)
                            .where(FindingEvent.device_id == device_id).order_by(FindingEvent.at.desc(), FindingEvent.id.desc()).limit(40)).all()
         net_hosts = s.scalars(select(NetworkHost).where(NetworkHost.device_id == device_id).order_by(NetworkHost.last_seen.desc())).all()
-        net_issues = s.scalars(select(NetworkIssue).where(NetworkIssue.host_id.in_([h.id for h in net_hosts]), NetworkIssue.status == "open")
+        net_issues = s.scalars(select(NetworkIssue).where(NetworkIssue.host_id.in_([h.id for h in net_hosts]), NetworkIssue.status == "open", sensor.issue_clause())
                                .order_by(NetworkIssue.cvss.desc().nulls_last())).all() if net_hosts else []
         return render(request, "device.html", user, dev=dev, site=site, client=client, fixes=fixes, by_fix=by_fix, software=software,
                       wua=wua, cross=_cross_check(dev, open_findings, wua), events=events, why=why, excs=excs,
@@ -564,15 +564,21 @@ def network_page(request: Request, site_id: int, show: str = "recent", user: str
             q = q.where(NetworkHost.last_seen >= now - RECENT)
         hosts = s.scalars(q).all()
         issues = s.execute(select(NetworkIssue, NetworkHost).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
-                           .where(NetworkHost.site_id == site_id, NetworkIssue.status == "open")
+                           .where(NetworkHost.site_id == site_id, NetworkIssue.status == "open", sensor.issue_clause())
                            .order_by(NetworkIssue.cvss.desc().nulls_last(), NetworkHost.ip)).all()
         open_by_host: dict[int, int] = {}
         for _, h in issues:
             open_by_host[h.id] = open_by_host.get(h.id, 0) + 1
+        notes: dict[int, list[str]] = {}
+        for i in s.scalars(select(NetworkIssue).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
+                           .where(NetworkHost.site_id == site_id, NetworkIssue.status == "open", NetworkIssue.cvss <= 0)
+                           .order_by(NetworkIssue.title)):
+            if i.title not in notes.setdefault(i.host_id, []):
+                notes[i.host_id].append(i.title)
         ids = [h.device_id for h in hosts if h.device_id]
         devices = {d.id: d for d in s.scalars(select(Device).where(Device.id.in_(ids)))} if ids else {}
         rows = [{"host": h, "new": sensor.is_new(h, site, now), "device": devices.get(h.device_id), "issues": open_by_host.get(h.id, 0),
-                 "online": site.sensor_scan_at is not None and h.last_seen >= site.sensor_scan_at} for h in hosts]
+                 "notes": notes.get(h.id, []), "online": site.sensor_scan_at is not None and h.last_seen >= site.sensor_scan_at} for h in hosts]
         # New first, then unmanaged, then managed; by address within each.
         rows.sort(key=lambda r: (not r["new"], r["device"] is not None, _ip_key(r["host"].ip)))
         return render(request, "network.html", user, site=site, client=client, rows=rows, issues=issues, show=show,
