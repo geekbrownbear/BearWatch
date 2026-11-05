@@ -159,3 +159,40 @@ def test_unknown_windows_support_is_not_a_yes(session):
         s.flush()
         item = next(i for i in report.build(s, c.id, date(2026, 10, 1)).checklist if i.title.startswith("Every PC runs"))
     assert item.status == "unknown" and item.detail == "Support dates are unknown for 1 PC."
+
+
+def test_exploited_and_overdue_must_be_the_same_finding(session):
+    """An overdue ordinary finding plus a fresh exploited one in the same fix is not 'exploited and late'."""
+    now = utcnow()
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "Mixed")
+        site, _ = tenants.create_site(s, c, "Office")
+        devs = []
+        for i in range(2):
+            d = Device(site_id=site.id, machine_guid=f"{i:032x}", hostname=f"PC{i}", token_hash=f"{i:064x}", enrolled_at=now, last_seen=now)
+            s.add(d)
+            devs.append(d)
+        s.flush()
+        for d, tier, due in ((devs[0], 4, -1), (devs[1], 1, 13)):
+            s.add(Finding(device_id=d.id, source="app", subject_key="chrome", subject="Chrome", cve_id=f"CVE-2026-{tier}000",
+                          fix_key="winget:Google.Chrome", fix_label="Update Chrome", status="open", exploit_tier=tier,
+                          first_seen=now, last_seen=now, opened_at=now, due_at=now + timedelta(days=due), risk=50))
+        s.flush()
+        rep = report.build(s, c.id, date(2026, 10, 1), now=now)
+        item = next(i for i in rep.checklist if i.title.startswith("Known exploited"))
+    assert item.status == "pass"
+
+
+def test_network_item_needs_every_site_scanned(session):
+    now = utcnow()
+    with db.session_scope() as s:
+        c = tenants.create_client(s, "Two offices")
+        a, _ = tenants.create_site(s, c, "Main")
+        tenants.create_site(s, c, "Branch")
+        a.sensor_device_id, a.sensor_scan_at, a.sensor_first_scan_at = 1, now, now
+        s.flush()
+        rep = report.build(s, c.id, date(2026, 10, 1), now=now)
+        item = next(i for i in rep.checklist if "office network" in i.title)
+        html = report.render_html(rep)
+    assert item.status == "unknown" and item.detail == "No network scan yet at Branch."
+    assert "Every PC passes the settings checks" not in html
