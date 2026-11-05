@@ -24,6 +24,7 @@ PENALTIES = {
     "unsupported": (5, 15),  # a PC on a Windows version that no longer gets security updates
     "checklist": (5, 30),  # a failed item on the insurance readiness checklist
     "silent": (2, 10),  # a PC whose agent has not checked in for a day
+    "exposed": (10, 30),  # a critical or high issue on the office network or seen from the internet
 }
 GRADES = ((90, "A"), (80, "B"), (70, "C"), (60, "D"))
 
@@ -273,6 +274,8 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     unverified_ips = [t.value for t in ips if t.snapshot is None or t.last_error]
     unverified_domains = [t.value for t in domains if t.snapshot is None or t.last_error]
     r.external = {"ips": len(ips), "domains": len(domains), "exposed": exposed, "spoofable": spoofable}
+    serious_ext = sum(1 for i in s.scalars(select(ExternalIssue).where(ExternalIssue.target_id.in_(t_ids), ExternalIssue.status == "open",
+                                                                       ExternalIssue.severity.in_(("critical", "high"))))) if t_ids else 0
 
     def ext_item(title: str, items: list, bad: list[str], unverified: list[str], bad_text: str, ok_text: str, none_text: str) -> CheckItem:
         if bad:
@@ -329,7 +332,12 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
     take("overdue", n, f"{plural(n, 'update')} past the fix deadline")
     n = len(unsupported)
     take("unsupported", n, f"{plural(n, 'PC')} on a Windows version that no longer gets security updates")
-    fails = [c for c in r.checklist if c.status == "fail" and not c.title.startswith(("Every PC runs", "Every PC is", "Known exploited"))]
+    # Items already counted on their own (Windows support, silent PCs, exploited updates, serious
+    # network and internet issues) are left out here so nothing costs points twice.
+    n = serious_net + serious_ext
+    take("exposed", n, f"{plural(n, 'serious issue')} on the office network or open to the internet")
+    fails = [c for c in r.checklist if c.status == "fail" and not c.title.startswith(
+        ("Every PC runs", "Every PC is", "Known exploited", "No unsafe services", "Remote access"))]
     take("checklist", len(fails), f"{plural(len(fails), 'insurance checklist item')} not met")
     n = len(r.silent)
     take("silent", n, f"{plural(n, 'PC')} not checking in")
@@ -364,7 +372,12 @@ def pdf_available() -> bool:
 
 
 def render_pdf(r: Report) -> bytes:
+    import logging
+
     from weasyprint import HTML
+
+    for name in ("weasyprint", "fontTools"):  # page-by-page progress and font subsetting chatter
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     from .web import STATIC
 

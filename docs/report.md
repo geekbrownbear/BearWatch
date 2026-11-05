@@ -47,8 +47,9 @@ bad month can't hide everything else.
 | An update not installed that fixes a known exploited vulnerability | 15 | 45 |
 | An update past its fix deadline | 5 | 25 |
 | A PC on a Windows version that no longer gets security updates | 5 | 15 |
-| An insurance checklist item not met (other than the rows above and silent PCs) | 5 | 30 |
+| An insurance checklist item not met (other than the rows above) | 5 | 30 |
 | A PC whose agent has not checked in for a day | 2 | 10 |
+| A critical or high issue on the office network (sensor) or open to the internet | 10 | 30 |
 
 A is 90 or more, B 80, C 70, D 60, and F below 60. Counting is per update (per fix row), not per
 CVE: one missing cumulative update that closes 40 CVEs costs the same as one that closes 2,

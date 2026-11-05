@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <title>{{ r.client.name }} security report, {{ month_name }}</title>
 <style>
-  @font-face { font-family: "Inter"; src: url("{{ static }}/inter-latin-wght.woff2") format("woff2"); font-weight: 100 900; }
-  @font-face { font-family: "Mozilla Text"; src: url("{{ static }}/mozilla-text-latin-wght.woff2") format("woff2"); font-weight: 200 700; }
+  @font-face { font-family: "Inter"; src: url("{{ static }}/inter-latin-wght.woff2") format("woff2"); }
+  @font-face { font-family: "Mozilla Text"; src: url("{{ static }}/mozilla-text-latin-wght.woff2") format("woff2"); }
   :root {
     /* Bearium palette on a light page. Cyan and lime fail contrast on white, so text uses the
        brand's light-mode substitutes (cyan #0E6C8C, lime #3E7D15). Lime stays a fill only. */
@@ -22,8 +22,8 @@
   body { font-family: Inter, "Helvetica Neue", Arial, sans-serif; font-size: 9.5pt; line-height: 1.5; color: var(--navy); margin: 0; }
   .screen body, body.screen { max-width: 8.5in; margin: 24px auto; padding: 0 16px; }
   h1, h2, h3 { font-family: "Mozilla Text", Inter, sans-serif; line-height: 1.2; margin: 0; }
-  h1 { font-size: 22pt; font-weight: 650; }
-  h2 { font-size: 13pt; font-weight: 650; margin: 18pt 0 6pt; break-after: avoid; }
+  h1 { font-size: 22pt; font-weight: 600; }
+  h2 { font-size: 13pt; font-weight: 600; margin: 18pt 0 6pt; break-after: avoid; }
   p { margin: 0 0 6pt; }
   .eyebrow { color: var(--cyan-ink); font-weight: 700; letter-spacing: 0.25em; text-transform: uppercase; font-size: 7.5pt; margin-bottom: 4pt; }
   .muted { color: var(--ink-3); }
@@ -37,7 +37,7 @@
   .g-A, .g-B { color: var(--lime-ink); } .g-C { color: var(--warn); } .g-D, .g-F { color: var(--bad); }
   .stats { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6pt; }
   .stat { border: 1px solid var(--rule-soft); background: var(--tint); border-radius: 6pt; padding: 6pt 8pt; }
-  .stat .n { font-family: "Mozilla Text", Inter, sans-serif; font-size: 15pt; font-weight: 650; }
+  .stat .n { font-family: "Mozilla Text", Inter, sans-serif; font-size: 15pt; font-weight: 600; }
   .stat .l { color: var(--ink-3); font-size: 7.5pt; }
   .bad { color: var(--bad); } .warn { color: var(--warn); } .good { color: var(--lime-ink); }
   table { width: 100%; border-collapse: collapse; margin: 2pt 0 4pt; }
