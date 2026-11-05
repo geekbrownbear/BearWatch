@@ -19,11 +19,12 @@ from sqlalchemy import String, and_, case, cast, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import __version__, auth, halo, lifecycle, posture, report, scoring, sensor, tenants
+from .. import __version__, auth, external, halo, lifecycle, posture, report, scoring, sensor, tenants
 from ..config import get_settings
 from ..db import session_scope
 from ..intel.common import utcnow
-from ..models import (Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, NetworkHost, NetworkIssue, Site,
+from ..models import (Client, Device, DeviceSoftware, ExternalIssue, ExternalTarget, Finding, FindingEvent, FindingException,
+                      NetworkHost, NetworkIssue, Site,
                       SyncState, WuaUpdate)
 
 HERE = Path(__file__).resolve().parent
@@ -242,16 +243,55 @@ def overview(request: Request, user: str = Depends(auth.current_user)):
 
 
 @router.get("/clients/{client_id}", response_class=HTMLResponse)
-def client_page(request: Request, client_id: int, user: str = Depends(auth.current_user)):
+def client_page(request: Request, client_id: int, user: str = Depends(auth.current_user), error: str | None = None):
     with session_scope() as s:
         client = s.get(Client, client_id) or _404()
         sites = s.scalars(select(Site).where(Site.client_id == client_id).order_by(Site.name)).all()
         interval = get_settings().sensor_interval_minutes
         net = {site.id: {**network_counts(s, site_id=site.id), "sensor": sensor.sensor_device(s, site),
                          "silent": sensor.sensor_silent(site, interval)} for site in sites}
-        return render(request, "client.html", user, client=client, sites=sites, fixes=fix_rows(s, client_id=client_id),
+        return render(request, "client.html", user, client=client, sites=sites, fixes=fix_rows(s, client_id=client_id), error=error,
                       devices=device_rows(s, client_id), net=net, halo_on=halo.configured(), halo_dry=get_settings().halo_dry_run,
-                      halo_open=halo.open_count(s, client_id))
+                      halo_open=halo.open_count(s, client_id), **_external_ctx(s, client_id))
+
+
+SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _external_ctx(s: Session, client_id: int) -> dict:
+    targets = s.scalars(select(ExternalTarget).where(ExternalTarget.client_id == client_id)
+                        .order_by(ExternalTarget.kind, ExternalTarget.value)).all()
+    ids = [t.id for t in targets]
+    issues = s.execute(select(ExternalIssue, ExternalTarget).join(ExternalTarget, ExternalTarget.id == ExternalIssue.target_id)
+                       .where(ExternalIssue.target_id.in_(ids), ExternalIssue.status == "open")).all() if ids else []
+    issues = sorted(issues, key=lambda x: (SEV_ORDER.get(x[0].severity, 9), x[1].value))
+    return {"ext_targets": targets, "ext_issues": issues, "ext_new": {t.id: external.new_ports(t) for t in targets}}
+
+
+@router.post("/clients/{client_id}/external")
+def add_external(request: Request, client_id: int, value: str = Form(..., max_length=300), user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    try:
+        kind, norm = external.normalize(value)
+    except ValueError as e:
+        return RedirectResponse(f"/clients/{client_id}?error=" + quote(str(e)) + "#internet", 303)
+    try:
+        with session_scope() as s:
+            s.get(Client, client_id) or _404()
+            s.add(ExternalTarget(client_id=client_id, kind=kind, value=norm, created_at=utcnow()))
+    except IntegrityError:
+        pass  # already listed
+    return RedirectResponse(f"/clients/{client_id}#internet", 303)
+
+
+@router.post("/external/{target_id}/delete")
+def delete_external(request: Request, target_id: int, user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    with session_scope() as s:
+        t = s.get(ExternalTarget, target_id) or _404()
+        client_id = t.client_id
+        s.delete(t)
+    return RedirectResponse(f"/clients/{client_id}#internet", 303)
 
 
 @router.post("/clients/{client_id}/halo")

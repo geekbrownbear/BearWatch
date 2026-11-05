@@ -224,6 +224,40 @@ def cmd_halo(args) -> int:
     return 0
 
 
+def cmd_external(args) -> int:
+    from . import external
+    from .intel.common import utcnow
+    from .models import ExternalIssue, ExternalTarget
+
+    with session_scope() as s:
+        if args.action == "add":
+            c = s.get(Client, args.client_id)
+            if c is None:
+                print(f"no client {args.client_id}", file=sys.stderr)
+                return 2
+            try:
+                kind, value = external.normalize(args.value)
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
+            s.add(ExternalTarget(client_id=c.id, kind=kind, value=value, created_at=utcnow()))
+            print(f"{c.name}: added {kind} {value}; it is checked within the hour")
+        elif args.action == "check":
+            n = external.run_due(s) if not args.now else 0
+            if args.now:
+                for t in s.scalars(select(ExternalTarget)):
+                    t.last_checked_at = None
+                n = external.run_due(s)
+            print(f"checked {n} targets")
+        else:
+            for t in s.scalars(select(ExternalTarget).order_by(ExternalTarget.client_id, ExternalTarget.value)):
+                issues = s.scalars(select(ExternalIssue).where(ExternalIssue.target_id == t.id, ExternalIssue.status == "open")).all()
+                print(f"{t.client_id:>4}  {t.kind:<6} {t.value:<40} {t.last_checked_at or 'not checked'}  {t.last_error or ''}")
+                for i in issues:
+                    print(f"        {i.severity:<8} {i.title}")
+    return 0
+
+
 def cmd_evaluate(args) -> int:
     with session_scope() as s:
         if args.all:
@@ -295,6 +329,15 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("client_id", type=int)
     a.add_argument("halo_id", help="the client's id in Halo, or 'none'")
 
+    p = sub.add_parser("external", help="a client's public addresses and domains, checked weekly from outside")
+    ep = p.add_subparsers(dest="action", required=True)
+    a = ep.add_parser("add")
+    a.add_argument("client_id", type=int)
+    a.add_argument("value", help="a public IP address or a domain name")
+    ep.add_parser("list")
+    a = ep.add_parser("check", help="check the targets that are due")
+    a.add_argument("--now", action="store_true", help="check every target now, due or not")
+
     p = sub.add_parser("report", help="write a client's monthly report")
     p.add_argument("client_id", type=int)
     p.add_argument("--month", help="YYYY-MM; default: last month")
@@ -321,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         "evaluate": cmd_evaluate,
         "report": cmd_report,
         "halo": cmd_halo,
+        "external": cmd_external,
     }
     return handlers[args.cmd](args)
 

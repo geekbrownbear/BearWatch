@@ -38,6 +38,45 @@
 <div class="table-wrap"><p class="empty">No devices have enrolled yet.</p></div>
 {% endif %}
 
+<h2 id="internet">Seen from the internet</h2>
+<p class="muted">Public IP addresses and domains for this client, checked once a week without scanning: open ports from Shodan's
+  public data, email spoofing protection (SPF and DMARC), DNSSEC and the website certificate.</p>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+{% if ext_issues %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Severity</th><th>Problem</th><th>Where</th><th>Details</th><th>How to fix it</th><th>Since</th></tr></thead>
+  <tbody>
+  {% for i, t in ext_issues %}
+    <tr><td>{{ m.severity(i.severity) }}</td><td><strong>{{ i.title }}</strong></td><td class="mono">{{ t.value }}</td>
+      <td class="muted">{{ i.detail or "" }}</td><td>{{ i.solution or "" }}</td><td>{{ ago(i.first_seen) }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Address or domain</th><th>What the internet sees</th><th>Last checked</th><th></th></tr></thead>
+  <tbody>
+  {% for t in ext_targets %}
+    {% set snap = t.snapshot or {} %}
+    <tr>
+      <td class="mono"><strong>{{ t.value }}</strong></td>
+      <td>{% if t.last_error %}<span class="bad">Check failed: {{ t.last_error }}</span>
+        {% elif t.kind == "ip" and t.last_checked_at %}{% if snap.ports %}Open ports: <span class="mono">{% for p in snap.ports %}{{ p }}{% if p in ext_new[t.id] %} <span class="badge t1">new</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% else %}No open ports in Shodan's data.{% endif %}
+        {% elif t.kind == "domain" and t.last_checked_at %}SPF {{ "yes" if snap.spf else "no" }} · DMARC {{ "yes" if snap.dmarc else "no" }} · DNSSEC {{ "yes" if snap.dnssec else "no" }}{% if snap.cert_days_left is not none %} · certificate {{ snap.cert_days_left }} days left{% endif %}
+        {% else %}<span class="muted">Waiting for the first check, within the hour.</span>{% endif %}</td>
+      <td>{{ ago(t.last_checked_at) }}</td>
+      <td><form class="inline" method="post" action="/external/{{ t.id }}/delete"><button class="link" type="submit">Remove</button></form></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="empty">None yet. Add the office's public IP address and the email domain.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+<form class="form-row" method="post" action="/clients/{{ client.id }}/external">
+  <label>Public IP address or domain <input type="text" name="value" maxlength="300" required placeholder="203.0.113.10 or example.com"></label>
+  <button class="btn" type="submit">Add</button>
+</form>
+
 <h2>Sites</h2>
 <div class="table-wrap"><table>
   <thead><tr><th>Site</th><th>Enrollment key</th><th>Windows Update cross-check</th><th>Network sensor</th><th class="num">Without the agent</th><th class="num">New this week</th><th class="num">Network issues</th></tr></thead>

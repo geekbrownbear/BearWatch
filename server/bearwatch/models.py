@@ -417,3 +417,41 @@ class HaloTicket(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (UniqueConstraint("client_id", "fix_key"),)
+
+
+class ExternalTarget(Base):
+    """A client's public IP address or domain, checked weekly from outside (external.py)."""
+
+    __tablename__ = "external_target"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("client.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(8))  # ip | domain
+    value: Mapped[str] = mapped_column(String(253))
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    first_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    # IP: {"ports", "vulns", "hostnames", "tags", "first_seen": {port: iso time}}.
+    # Domain: {"spf", "dmarc", "dnssec", "cert_days_left"}.
+    snapshot: Mapped[dict | None] = mapped_column(JSON)
+
+    __table_args__ = (UniqueConstraint("client_id", "kind", "value"),)
+
+
+class ExternalIssue(Base):
+    """A problem seen from the internet, open until the next check no longer sees it."""
+
+    __tablename__ = "external_issue"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("external_target.id", ondelete="CASCADE"), index=True)
+    check_id: Mapped[str] = mapped_column(String(40))  # port-3389, spf-missing, ...
+    title: Mapped[str] = mapped_column(String(200))
+    severity: Mapped[str] = mapped_column(String(8))
+    detail: Mapped[str | None] = mapped_column(String(1000))
+    solution: Mapped[str | None] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(8), default="open", index=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime)
+    last_seen: Mapped[datetime] = mapped_column(DateTime)
+    fixed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    __table_args__ = (UniqueConstraint("target_id", "check_id"),)

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from . import lifecycle, posture, scoring, sensor
 from .intel.common import utcnow
-from .models import Client, Device, Finding, FindingEvent, NetworkHost, NetworkIssue, Site
+from .models import Client, Device, ExternalIssue, ExternalTarget, Finding, FindingEvent, NetworkHost, NetworkIssue, Site
 
 SILENT = timedelta(hours=24)
 
@@ -73,6 +73,7 @@ class Report:
     settings: list[dict] = field(default_factory=list)
     network: dict = field(default_factory=dict)
     network_issues: list[dict] = field(default_factory=list)
+    external: dict = field(default_factory=dict)
     checklist: list[CheckItem] = field(default_factory=list)
     score: int = 100
     grade: str = "A"
@@ -249,6 +250,18 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
             return CheckItem(title, "unknown", f"Passes on {plural(passes, 'PC')}; {plural(unknown, 'PC')} not checked yet.")
         return CheckItem(title, "pass", ok)
 
+    # Seen from the internet (external.py).
+    targets = s.scalars(select(ExternalTarget).where(ExternalTarget.client_id == client_id, ExternalTarget.last_checked_at.is_not(None))).all()
+    t_ids = [t.id for t in targets]
+    ext_open = {(i.target_id, i.check_id) for i in s.scalars(select(ExternalIssue).where(ExternalIssue.target_id.in_(t_ids),
+                                                                                        ExternalIssue.status == "open"))} if t_ids else set()
+    ips = [t for t in targets if t.kind == "ip"]
+    domains = [t for t in targets if t.kind == "domain"]
+    remote_ports = {"port-3389", "port-445", "port-23", "port-5900", "port-135", "port-139"}
+    exposed = sorted({t.value for t in ips if any((t.id, c) in ext_open for c in remote_ports)})
+    spoofable = sorted({t.value for t in domains if any((t.id, c) in ext_open for c in ("spf-missing", "spf-allows-all", "dmarc-missing"))})
+    r.external = {"ips": len(ips), "domains": len(domains), "exposed": exposed, "spoofable": spoofable}
+
     known_late = any(g["overdue"] and g["tier"] == 1 for g in fixes.values())
     r.checklist = [
         setting(["av-unhealthy"], "Antivirus is on and up to date", "On and up to date on every workstation.",
@@ -270,6 +283,14 @@ def build(s: Session, client_id: int, month: date, now: datetime | None = None) 
         CheckItem("Every PC is monitored", "fail" if r.silent else ("pass" if ids else "unknown"),
                   f"{plural(len(r.silent), 'PC')} {'has' if len(r.silent) == 1 else 'have'} not checked in for a day." if r.silent
                   else "Every PC checked in within the last day." if ids else "No PCs report to BearWatch yet."),
+        CheckItem("Remote access and file sharing are closed to the internet",
+                  ("fail" if exposed else "pass") if ips else "unknown",
+                  (f"Open on {', '.join(exposed)}." if exposed else f"Closed on {plural(len(ips), 'public address')}.")
+                  if ips else "No public addresses listed for this client yet."),
+        CheckItem("Email is protected from spoofing (SPF and DMARC)",
+                  ("fail" if spoofable else "pass") if domains else "unknown",
+                  (f"Missing for {', '.join(spoofable)}." if spoofable else f"Set up for {plural(len(domains), 'domain')}.")
+                  if domains else "No email domains listed for this client yet."),
         CheckItem("No unsafe services on the office network",
                   ("fail" if serious_net else "pass") if has_sensor else "unknown",
                   (f"{plural(serious_net, 'serious issue')} found." if serious_net else "None found in the last scan.")

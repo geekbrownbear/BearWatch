@@ -18,7 +18,7 @@ import threading
 import time
 from datetime import timedelta
 
-from . import findings, halo, posture, scoring
+from . import external, findings, halo, posture, scoring
 from .db import init_db, session_scope
 from .intel.common import run_sync, utcnow
 from .jobs import JOBS
@@ -27,6 +27,7 @@ from .models import SyncState
 log = logging.getLogger("bearwatch.worker")
 DEVICE_TICK = 30
 HALO_TICK = 900  # HaloPSA tickets, after device evaluation (docs/halo.md)
+EXTERNAL_TICK = 3600  # look for public addresses and domains due their weekly check (docs/external.md)
 FEED_TICK = 300
 ERROR_BACKOFF = timedelta(minutes=30)
 
@@ -107,7 +108,7 @@ def main() -> None:
     init_db()
     log.info("worker started, jobs: %s", ", ".join(JOBS))
     feeds = start_feeds(threading.Event())
-    last_halo = 0.0
+    last_halo = last_external = 0.0
     while True:
         try:
             run_devices()
@@ -116,6 +117,12 @@ def main() -> None:
         if time.monotonic() - last_halo >= HALO_TICK:
             last_halo = time.monotonic()
             run_halo()
+        if time.monotonic() - last_external >= EXTERNAL_TICK:
+            last_external = time.monotonic()
+            try:
+                run_sync("external", external.run_due)
+            except Exception:  # logged in run_sync
+                pass
         if not feeds.is_alive():  # feeds_loop catches everything, so this should never happen
             log.error("feed thread stopped; restarting it")
             feeds = start_feeds(threading.Event())

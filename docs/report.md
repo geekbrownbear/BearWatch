@@ -30,6 +30,8 @@ reopened events, so they show what happened in each month.
    - Known exploited vulnerabilities are fixed within 14 days.
    - Every PC is monitored (checked in within 24 hours).
    - No unsafe services on the office network (needs the network sensor, [sensor.md](sensor.md)).
+   - Remote access and file sharing closed to the internet, and email protected from spoofing
+     (needs the client's public addresses and domains, [external.md](external.md)).
 6. **Windows versions** and when each stops getting security updates.
 7. **Risky Windows settings,** by how many PCs fail each one.
 8. **The office network:** devices seen, devices without the agent, new devices, unsafe
