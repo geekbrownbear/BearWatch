@@ -54,6 +54,7 @@ const SWEEP_WAIT: Duration = Duration::from_millis(2_500);
 const MAX_HOSTS: usize = 4096;
 const MAX_PORTS: usize = 200;
 const MAX_ISSUES: usize = 50;
+const MAX_UNCHECKED: usize = 200;
 const LEN_ADDR: usize = 64;
 const LEN_NAME: usize = 255;
 const LEN_BANNER: usize = 300;
@@ -94,6 +95,10 @@ pub struct Host {
     pub rtt_ms: Option<f64>,
     pub ports: Vec<Port>,
     pub issues: Vec<Issue>,
+    /// Open ports where a check that applies could not finish (connect failure, timeout,
+    /// short or unparseable reply). No issue there proves nothing, so the server keeps that
+    /// port's earlier issues open. Sorted, no duplicates.
+    pub unchecked_ports: Vec<u16>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -346,7 +351,7 @@ pub fn scan() -> Payload {
     let detected = pool(open.len(), DETECT_THREADS, |i| {
         let (ip, p) = &open[i];
         let (svc, findings) = detect::probe(*ip, p.port, &ctx);
-        Some((*ip, Port { port: p.port, service: svc.name.to_string(), banner: svc.banner.or_else(|| p.banner.clone()) }, findings))
+        Some((*ip, p.banner.clone(), svc, findings))
     });
 
     let vendors = vendor::lookup_all(&found.iter().filter_map(|f| f.mac).collect::<Vec<_>>());
@@ -362,21 +367,14 @@ pub fn scan() -> Payload {
                 rtt_ms: f.rtt.map(|d| (d.as_secs_f64() * 100_000.0).round() / 100.0),
                 ports: Vec::new(),
                 issues: Vec::new(),
+                unchecked_ports: Vec::new(),
             };
             (f.ip, host)
         })
         .collect();
-    for (ip, port, findings) in detected {
+    for (ip, scan_banner, svc, findings) in detected {
         if let Some(h) = by_ip.get_mut(&ip) {
-            h.ports.push(port);
-            h.issues.extend(findings.into_iter().map(|f| Issue {
-                id: f.check.id.to_string(),
-                port: f.port,
-                title: f.check.title.to_string(),
-                cvss: f.check.score,
-                evidence: f.evidence,
-                solution: f.check.solution.to_string(),
-            }));
+            record(h, svc, scan_banner, findings);
         }
     }
     let mut hosts: Vec<(Ipv4Addr, Host)> = by_ip.into_iter().collect();
@@ -397,6 +395,22 @@ pub fn scan() -> Payload {
     let (ports, issues) = payload.hosts.iter().fold((0, 0), |(p, i), h| (p + h.ports.len(), i + h.issues.len()));
     log(&format!("sensor scan finished in {} s: {} hosts, {ports} open ports, {issues} findings", payload.duration_ms / 1000, payload.hosts.len()));
     payload
+}
+
+/// Add one probed port, its findings, and whether its checks finished, to a host.
+fn record(h: &mut Host, svc: detect::Service, scan_banner: Option<String>, findings: Vec<checks::Finding>) {
+    if svc.inconclusive {
+        h.unchecked_ports.push(svc.port);
+    }
+    h.ports.push(Port { port: svc.port, service: svc.name.to_string(), banner: svc.banner.or(scan_banner) });
+    h.issues.extend(findings.into_iter().map(|f| Issue {
+        id: f.check.id.to_string(),
+        port: f.port,
+        title: f.check.title.to_string(),
+        cvss: f.check.score,
+        evidence: f.evidence,
+        solution: f.check.solution.to_string(),
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +464,9 @@ pub fn limit(p: &mut Payload) {
         }
         h.issues.sort_by(|a, b| b.cvss.total_cmp(&a.cvss).then(a.port.cmp(&b.port)).then(a.id.cmp(&b.id)));
         h.issues.truncate(MAX_ISSUES);
+        h.unchecked_ports.sort_unstable();
+        h.unchecked_ports.dedup();
+        h.unchecked_ports.truncate(MAX_UNCHECKED);
         for i in &mut h.issues {
             fit(&mut i.id, LEN_NAME);
             fit(&mut i.title, LEN_TITLE);
@@ -520,6 +537,7 @@ mod tests {
                 rtt_ms: Some(0.4),
                 ports: vec![Port { port: 22, service: "ssh".into(), banner: None }],
                 issues: vec![Issue { id: "PIS-0003".into(), port: 6379, title: "t".into(), cvss: 9.3, evidence: "e".into(), solution: "s".into() }],
+                unchecked_ports: vec![8443],
                 ..Default::default()
             }],
         };
@@ -537,7 +555,8 @@ mod tests {
                 "workgroup": null,
                 "rtt_ms": 0.4,
                 "ports": [{"port": 22, "service": "ssh", "banner": null}],
-                "issues": [{"id": "PIS-0003", "port": 6379, "title": "t", "cvss": 9.3, "evidence": "e", "solution": "s"}]
+                "issues": [{"id": "PIS-0003", "port": 6379, "title": "t", "cvss": 9.3, "evidence": "e", "solution": "s"}],
+                "unchecked_ports": [8443]
             }]
         });
         assert_eq!(v, expected);
@@ -546,6 +565,7 @@ mod tests {
         assert_eq!(empty["names"], serde_json::json!({"dns": null, "netbios": null, "mdns": null, "upnp": null}));
         assert_eq!(empty["ports"], serde_json::json!([]));
         assert_eq!(empty["issues"], serde_json::json!([]));
+        assert_eq!(empty["unchecked_ports"], serde_json::json!([]));
     }
 
     #[test]
@@ -574,6 +594,7 @@ mod tests {
             names: Names { upnp: Some("n".repeat(300)), ..Default::default() },
             ports: (1..=250).rev().map(|p| Port { port: p, service: "unknown".into(), banner: Some("b".repeat(400)) }).collect(),
             issues: (0..60).map(|i| issue(if i == 59 { 9.3 } else { 0.0 }, i)).collect(),
+            unchecked_ports: (1..=300).rev().chain([5, 5]).collect(),
             ..Default::default()
         };
         let mut p = Payload { agent_version: "0.3.0", started_at: String::new(), duration_ms: 0, networks: vec![], hosts: vec![host; 4100] };
@@ -588,5 +609,28 @@ mod tests {
         assert_eq!((h.issues[0].title.len(), h.issues[0].evidence.len(), h.issues[0].solution.len()), (LEN_TITLE, LEN_EVIDENCE, LEN_SOLUTION));
         assert_eq!(h.vendor.as_ref().unwrap().len(), LEN_NAME);
         assert_eq!(h.names.upnp.as_ref().unwrap().len(), LEN_NAME);
+        assert_eq!(h.unchecked_ports, (1..=200).collect::<Vec<u16>>());
+    }
+
+    /// A check that could not finish puts its port in unchecked_ports; one that finished does not.
+    #[test]
+    fn probe_failure_lands_in_unchecked_ports() {
+        let ctx = detect::ProbeCtx::new(Duration::from_millis(300));
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut h = Host { ip: "127.0.0.1".into(), ..Default::default() };
+        let (svc, findings) = detect::probe_as(Ipv4Addr::LOCALHOST, closed, detect::Plan::Redis, &ctx);
+        record(&mut h, svc, None, findings);
+        // RDP: the open port is the finding, nothing can fail.
+        let (svc, findings) = detect::probe_as(Ipv4Addr::LOCALHOST, 3389, detect::Plan::Exposed, &ctx);
+        record(&mut h, svc, None, findings);
+        let mut p = Payload { agent_version: "0.3.0", started_at: String::new(), duration_ms: 0, networks: vec![], hosts: vec![h] };
+        limit(&mut p);
+        let h = &p.hosts[0];
+        assert_eq!(h.unchecked_ports, [closed]);
+        assert_eq!(h.ports.len(), 2);
+        assert_eq!(h.issues.len(), 1);
+        assert_eq!(h.issues[0].id, "PIS-0010");
+        let v = serde_json::to_value(h).unwrap();
+        assert_eq!(v["unchecked_ports"], serde_json::json!([closed]));
     }
 }

@@ -16,6 +16,14 @@ use std::time::Duration;
 /// container management ports.
 pub const PRESET_VULN: &str = "21,22,23,25,53,80,81,110,111,135,139,143,443,445,465,548,554,587,631,993,995,1433,1521,1723,1883,2049,2375,3000,3306,3389,4443,5000,5001,5432,5900,5901,6379,7547,8000,8008,8080,8081,8088,8443,8888,9000,9100,9200,9443,11211,27017,32400";
 
+/// Printing ports: LPD and raw/JetDirect. A printer prints whatever arrives there, so the scan
+/// only connects and closes again; no banner read, no probe, nothing written.
+const PRINT_PORTS: [u16; 4] = [515, 9100, 9101, 9102];
+
+pub fn is_print_port(port: u16) -> bool {
+    PRINT_PORTS.contains(&port)
+}
+
 /// One open port.
 #[derive(Clone, Debug)]
 pub struct OpenPort {
@@ -33,7 +41,7 @@ pub fn preset() -> Vec<u16> {
 pub fn probe(ip: Ipv4Addr, port: u16, timeout: Duration, grab_banner: bool) -> Option<OpenPort> {
     let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
     let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
-    let banner = if grab_banner { read_banner(&mut stream) } else { None };
+    let banner = if grab_banner && !is_print_port(port) { read_banner(&mut stream) } else { None };
     Some(OpenPort { port, banner })
 }
 
@@ -72,6 +80,7 @@ pub fn service_name(port: u16) -> &'static str {
         445 => "smb",
         548 => "afp",
         554 => "rtsp",
+        515 => "lpd",
         631 => "ipp",
         1433 => "mssql",
         1521 => "oracle",
@@ -86,7 +95,7 @@ pub fn service_name(port: u16) -> &'static str {
         6379 => "redis",
         7547 => "tr-069",
         9000 => "http",
-        9100 => "jetdirect",
+        9100..=9102 => "jetdirect",
         9200 => "elasticsearch",
         11211 => "memcached",
         27017 => "mongodb",
