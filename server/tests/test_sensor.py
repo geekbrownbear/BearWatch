@@ -222,6 +222,50 @@ def test_new_sensor_resets_the_baseline(session):
         assert not sensor.is_new(hosts["10.1.0.9"], site)
 
 
+def test_addresses_of_one_host_are_merged_and_shared_names_link_nothing(session):
+    with db.session_scope() as s:
+        client = tenants.create_client(s, "Lab")
+        site, _ = tenants.create_site(s, client, "Office")
+        warehouse, _ = tenants.create_site(s, client, "Warehouse")
+        a = Device(site_id=site.id, machine_guid=GUID_A, hostname="OFFICE-PC", token_hash="a" * 64, enrolled_at=site.created_at)
+        b = Device(site_id=warehouse.id, machine_guid=GUID_B, hostname="office-pc.corp.local", token_hash="b" * 64,
+                   enrolled_at=site.created_at)
+        s.add_all([a, b])
+        s.flush()
+
+        def scan(*hosts):
+            return sensor.store(s, site, sensor.Report.model_validate(_scan(*hosts)))
+
+        # The printer answers on two addresses; Redis listens only on the second one.
+        first = _host("10.0.0.5", PRINTER_MAC, ports=(80,))
+        second = _host("10.0.0.6", PRINTER_MAC, ports=(6379,), issues=(REDIS,))
+        named = _host("10.0.0.7", LAPTOP_MAC, name="OFFICE-PC")
+        assert scan(first, second, named) == 2
+        hosts = {h.key: h for h in s.scalars(select(NetworkHost))}
+        assert sorted(p["port"] for p in hosts[f"mac:{PRINTER_MAC}"].ports) == [80, 6379]
+        assert [(i.check_id, i.status) for i in s.scalars(select(NetworkIssue))] == [("PIS-0005", "open")]
+        # Two PCs of this client are called OFFICE-PC: the name links the host to neither.
+        assert hosts[f"mac:{LAPTOP_MAC}"].device_id is None
+
+        # Next scan: the first address is clean, but the check could not finish on the second.
+        unchecked = _host("10.0.0.6", PRINTER_MAC, ports=(6379,))
+        unchecked["unchecked_ports"] = [6379]
+        scan(_host("10.0.0.5", PRINTER_MAC, ports=(80,)), unchecked)
+        s.expire_all()
+        assert [i.status for i in s.scalars(select(NetworkIssue))] == ["open"]
+        # Both addresses checked and clean: fixed.
+        scan(_host("10.0.0.5", PRINTER_MAC, ports=(80,)), _host("10.0.0.6", PRINTER_MAC, ports=(6379,)))
+        s.expire_all()
+        assert [i.status for i in s.scalars(select(NetworkIssue))] == ["fixed"]
+
+        # Once the warehouse PC is renamed, the name points at one PC again.
+        b.hostname = "WAREHOUSE-PC"
+        s.flush()
+        scan(named)
+        s.expire_all()
+        assert s.scalars(select(NetworkHost).where(NetworkHost.mac == LAPTOP_MAC)).one().device_id == a.id
+
+
 def test_real_agent_scan_and_notes(session):
     """A scan shaped exactly like agent 0.3.0's (lab VLAN): score-0 checks are notes, not issues."""
     rdp = {"id": "PIS-0010", "port": 3389, "title": "Remote Desktop (RDP) reachable", "cvss": 0.0, "evidence": "port open", "solution": None}
