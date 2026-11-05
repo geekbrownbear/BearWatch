@@ -232,8 +232,10 @@ def check(s: Session, t: ExternalTarget, http: httpx.Client, cert_days_left=None
     s.flush()
 
 
-def run_due(s: Session, http: httpx.Client | None = None) -> int:
-    targets = due(s)
+def run_due(s: Session, http: httpx.Client | None = None, force: bool = False) -> int:
+    """Check every target that is due, or with force every target. Nothing is written before the
+    lookups (see check)."""
+    targets = list(s.scalars(select(ExternalTarget))) if force else due(s)
     if not targets:
         return 0
     own = http is None

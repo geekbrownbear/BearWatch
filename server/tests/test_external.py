@@ -175,7 +175,9 @@ def test_lookups_happen_before_any_write(session):
 
         respx.get(url__regex=r"https://internetdb\.shodan\.io/.*").mock(side_effect=handler)
         assert external.run_due(s) == 2
-        assert dirty == [False, False]
+        # `bearwatch external check --now`: every target again, still nothing written first.
+        assert external.run_due(s, force=True) == 2
+        assert dirty == [False, False, False, False]
         assert all(t.last_checked_at is not None for t in s.scalars(select(ExternalTarget)))
 
 

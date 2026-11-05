@@ -243,11 +243,7 @@ def cmd_external(args) -> int:
             s.add(ExternalTarget(client_id=c.id, kind=kind, value=value, created_at=utcnow()))
             print(f"{c.name}: added {kind} {value}; it is checked within the hour")
         elif args.action == "check":
-            n = external.run_due(s) if not args.now else 0
-            if args.now:
-                for t in s.scalars(select(ExternalTarget)):
-                    t.last_checked_at = None
-                n = external.run_due(s)
+            n = external.run_due(s, force=args.now)
             print(f"checked {n} targets")
         else:
             for t in s.scalars(select(ExternalTarget).order_by(ExternalTarget.client_id, ExternalTarget.value)):
