@@ -76,3 +76,17 @@ def device_for_token(s: Session, token: str) -> Device | None:
     if not token.startswith(DEVICE_PREFIX):
         return None
     return s.scalar(select(Device).where(Device.token_hash == digest(token)))
+
+
+def set_sensor(s: Session, site: Site, dev: Device | None) -> None:
+    """Make `dev` the PC that scans this site's network, or turn sensor mode off with None.
+
+    A new sensor may sit on another subnet, so its first scan becomes the new baseline: hosts it
+    finds then are not flagged as new. Hosts and issues found so far stay.
+    """
+    if dev is not None and dev.site_id != site.id:
+        raise ValueError(f"{dev.hostname} is enrolled in another site")
+    new_id = dev.id if dev is not None else None
+    if new_id != site.sensor_device_id:
+        site.sensor_device_id = new_id
+        site.sensor_first_scan_at = None

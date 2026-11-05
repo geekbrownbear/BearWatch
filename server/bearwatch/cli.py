@@ -142,6 +142,24 @@ def cmd_site(args) -> int:
                 print(f"no client named {args.client!r}; add it with `bearwatch client add`", file=sys.stderr)
                 return 2
             site, key = tenants.create_site(s, client, args.name, wua_check=args.wua)
+        elif args.action == "sensor":
+            site = s.get(Site, args.site_id)
+            if site is None:
+                print(f"no site {args.site_id}", file=sys.stderr)
+                return 2
+            dev = None
+            if args.device != "none":
+                dev = s.get(Device, int(args.device)) if args.device.isdigit() else None
+                if dev is None:
+                    print(f"no device {args.device}", file=sys.stderr)
+                    return 2
+            try:
+                tenants.set_sensor(s, site, dev)
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
+            print(f"site {site.id}: sensor {'off' if dev is None else f'{dev.hostname} (device {dev.id})'}")
+            return 0
         else:
             site = s.get(Site, args.site_id)
             if site is None:
@@ -205,8 +223,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("action", choices=["list", "add"])
     p.add_argument("name", nargs="?")
 
-    p = sub.add_parser("site", help="add a site or rotate its enrollment key")
+    p = sub.add_parser("site", help="add a site, rotate its enrollment key, or pick its sensor PC")
     sp = p.add_subparsers(dest="action", required=True)
+    a = sp.add_parser("sensor", help="pick the enrolled PC that scans the site's network")
+    a.add_argument("site_id", type=int)
+    a.add_argument("device", help="device id, or 'none' to turn sensor mode off")
     a = sp.add_parser("add")
     a.add_argument("--client", required=True, help="client name")
     a.add_argument("--name", required=True, help="site name")

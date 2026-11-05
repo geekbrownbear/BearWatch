@@ -34,12 +34,21 @@
 
 <h2>Sites</h2>
 <div class="table-wrap"><table>
-  <thead><tr><th>Site</th><th>Enrollment key</th><th>Windows Update cross-check</th></tr></thead>
+  <thead><tr><th>Site</th><th>Enrollment key</th><th>Windows Update cross-check</th><th>Network sensor</th><th class="num">Without the agent</th><th class="num">New this week</th><th class="num">Network issues</th></tr></thead>
   <tbody>
   {% for s in sites %}
-    <tr><td><strong>{{ s.name }}</strong></td><td class="mono">{{ s.enroll_key_hint }}...</td><td>{{ "Weekly" if s.wua_check else "Off" }}</td></tr>
+    {% set n = net[s.id] %}
+    <tr>
+      <td><strong>{{ s.name }}</strong></td>
+      <td class="mono">{{ s.enroll_key_hint }}...</td>
+      <td>{{ "Weekly" if s.wua_check else "Off" }}</td>
+      <td>{% if n.sensor %}<a href="/sites/{{ s.id }}/network">{{ n.sensor.hostname }}</a>{% if n.silent %} <span class="bad">silent</span>{% elif s.sensor_scan_at is none %} <span class="muted">waiting for the first scan</span>{% endif %}{% else %}<span class="muted">Off</span>{% endif %}</td>
+      <td class="num">{{ n.net_unmanaged }}</td>
+      <td class="num">{% if n.net_new %}<span class="t1">{{ n.net_new }}</span>{% else %}0{% endif %}</td>
+      <td class="num">{% if n.net_issues %}<span class="bad">{{ n.net_issues }}</span>{% else %}0{% endif %}</td>
+    </tr>
   {% else %}
-    <tr><td colspan="3" class="empty">No sites. <a href="/admin">Add one</a>.</td></tr>
+    <tr><td colspan="7" class="empty">No sites. <a href="/admin">Add one</a>.</td></tr>
   {% endfor %}
   </tbody>
 </table></div>

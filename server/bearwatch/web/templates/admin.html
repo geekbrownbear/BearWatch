@@ -29,9 +29,16 @@
   </form>
 </div>
 
+<div class="card">
+  <h3>Network sensor</h3>
+  <p class="muted">Pick one enrolled PC per site to scan that site's network every few hours. It finds devices without the agent,
+    flags new ones, and checks common services for unsafe settings, like a database with no password. The scan only reads
+    what devices show to anyone on the network. Pick a PC that stays on, wired if possible, with agent 0.3.0 or later.</p>
+</div>
+
 <h2>Sites</h2>
 <div class="table-wrap"><table>
-  <thead><tr><th>Client</th><th>Site</th><th>Key starts with</th><th class="num">Devices</th><th>Windows Update cross-check</th><th></th></tr></thead>
+  <thead><tr><th>Client</th><th>Site</th><th>Key starts with</th><th class="num">Devices</th><th>Windows Update cross-check</th><th>Network sensor</th><th></th></tr></thead>
   <tbody>
   {% for s in sites %}
     <tr>
@@ -42,10 +49,23 @@
       <td>
         <form class="inline" method="post" action="/admin/sites/{{ s.id }}/wua"><button class="link" type="submit">{{ "Weekly (turn off)" if s.wua_check else "Off (turn on)" }}</button></form>
       </td>
+      <td>
+        {% set devs = site_devices.get(s.id, []) %}
+        {% if devs %}
+        <form class="inline" method="post" action="/admin/sites/{{ s.id }}/sensor">
+          <select name="device_id" aria-label="Sensor PC for {{ s.name }}">
+            <option value="">Off</option>
+            {% for d in devs %}<option value="{{ d.id }}"{% if d.id == s.sensor_device_id %} selected{% endif %}>{{ d.hostname }}</option>{% endfor %}
+          </select>
+          <button class="link" type="submit">Save</button>
+        </form>
+        {% if s.sensor_device_id %} <a href="/sites/{{ s.id }}/network">Network</a>{% endif %}
+        {% else %}<span class="muted">Enroll a PC first</span>{% endif %}
+      </td>
       <td><form class="inline" method="post" action="/admin/sites/{{ s.id }}/rotate"><button class="link" type="submit">New enrollment key</button></form></td>
     </tr>
   {% else %}
-    <tr><td colspan="6" class="empty">No sites yet.</td></tr>
+    <tr><td colspan="7" class="empty">No sites yet.</td></tr>
   {% endfor %}
   </tbody>
 </table></div>

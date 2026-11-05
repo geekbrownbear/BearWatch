@@ -19,11 +19,12 @@ from sqlalchemy import String, and_, case, cast, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import __version__, auth, posture, scoring, tenants
+from .. import __version__, auth, posture, scoring, sensor, tenants
 from ..config import get_settings
 from ..db import session_scope
 from ..intel.common import utcnow
-from ..models import Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, Site, SyncState, WuaUpdate
+from ..models import (Client, Device, DeviceSoftware, Finding, FindingEvent, FindingException, NetworkHost, NetworkIssue, Site,
+                      SyncState, WuaUpdate)
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -163,9 +164,32 @@ def client_rows(s: Session) -> list[dict]:
                 "exploited": sum(d["exploited"] for d in devs),
                 "overdue": sum(d["overdue"] for d in devs),
                 "top_fix": top[0] if top else None,
+                **network_counts(s, client_id=c.id),
             }
         )
     return rows
+
+
+RECENT = timedelta(days=30)  # hosts not seen for longer drop out of the counts (still listed)
+
+
+def network_counts(s: Session, client_id: int | None = None, site_id: int | None = None) -> dict:
+    """Hosts the sensors saw in the last 30 days: unmanaged, new, and open issues."""
+    now = utcnow()
+    q = select(NetworkHost, Site).join(Site, Site.id == NetworkHost.site_id).where(NetworkHost.last_seen >= now - RECENT)
+    iq = (select(func.count(NetworkIssue.id)).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
+          .join(Site, Site.id == NetworkHost.site_id).where(NetworkIssue.status == "open", sensor.issue_clause()))
+    if client_id is not None:
+        q, iq = q.where(Site.client_id == client_id), iq.where(Site.client_id == client_id)
+    if site_id is not None:
+        q, iq = q.where(Site.id == site_id), iq.where(Site.id == site_id)
+    hosts = s.execute(q).all()
+    return {
+        "net_hosts": len(hosts),
+        "net_unmanaged": sum(1 for h, _ in hosts if h.device_id is None),
+        "net_new": sum(1 for h, site in hosts if sensor.is_new(h, site, now)),
+        "net_issues": s.scalar(iq) or 0,
+    }
 
 
 # --- sign-in -------------------------------------------------------------------------------
@@ -212,6 +236,8 @@ def overview(request: Request, user: str = Depends(auth.current_user)):
             "open": sum(c["open"] for c in clients),
             "exploited": sum(c["exploited"] for c in clients),
             "overdue": sum(c["overdue"] for c in clients),
+            "net_new": sum(c["net_new"] for c in clients),
+            "net_issues": sum(c["net_issues"] for c in clients),
         })
 
 
@@ -220,7 +246,11 @@ def client_page(request: Request, client_id: int, user: str = Depends(auth.curre
     with session_scope() as s:
         client = s.get(Client, client_id) or _404()
         sites = s.scalars(select(Site).where(Site.client_id == client_id).order_by(Site.name)).all()
-        return render(request, "client.html", user, client=client, sites=sites, fixes=fix_rows(s, client_id=client_id), devices=device_rows(s, client_id))
+        interval = get_settings().sensor_interval_minutes
+        net = {site.id: {**network_counts(s, site_id=site.id), "sensor": sensor.sensor_device(s, site),
+                         "silent": sensor.sensor_silent(site, interval)} for site in sites}
+        return render(request, "client.html", user, client=client, sites=sites, fixes=fix_rows(s, client_id=client_id),
+                      devices=device_rows(s, client_id), net=net)
 
 
 @router.get("/fix", response_class=HTMLResponse)
@@ -261,9 +291,13 @@ def device_page(request: Request, device_id: int, user: str = Depends(auth.curre
         wua = s.scalars(select(WuaUpdate).where(WuaUpdate.device_id == device_id).order_by(WuaUpdate.title)).all()
         events = s.execute(select(FindingEvent, Finding).join(Finding, Finding.id == FindingEvent.finding_id)
                            .where(FindingEvent.device_id == device_id).order_by(FindingEvent.at.desc(), FindingEvent.id.desc()).limit(40)).all()
+        net_hosts = s.scalars(select(NetworkHost).where(NetworkHost.device_id == device_id).order_by(NetworkHost.last_seen.desc())).all()
+        net_issues = s.scalars(select(NetworkIssue).where(NetworkIssue.host_id.in_([h.id for h in net_hosts]), NetworkIssue.status == "open", sensor.issue_clause())
+                               .order_by(NetworkIssue.cvss.desc().nulls_last())).all() if net_hosts else []
         return render(request, "device.html", user, dev=dev, site=site, client=client, fixes=fixes, by_fix=by_fix, software=software,
                       wua=wua, cross=_cross_check(dev, open_findings, wua), events=events, why=why, excs=excs,
-                      importance=scoring.importance(dev), settings=_settings(dev))
+                      importance=scoring.importance(dev), settings=_settings(dev), net_hosts=net_hosts, net_issues=net_issues,
+                      is_sensor=site.sensor_device_id == dev.id, severity_of=sensor.severity)
 
 
 def _settings(dev: Device) -> list[posture.Result] | None:
@@ -453,8 +487,11 @@ def admin_page(request: Request, user: str = Depends(auth.current_user), error: 
         sites = s.scalars(select(Site).order_by(Site.name)).all()
         counts = dict(s.execute(select(Device.site_id, func.count()).group_by(Device.site_id)).all())
         sites = sorted(sites, key=lambda x: ({c.id: c.name for c in clients}[x.client_id].lower(), x.name.lower()))
+        site_devices: dict[int, list[Device]] = {}
+        for d in s.scalars(select(Device).order_by(func.lower(Device.hostname))):
+            site_devices.setdefault(d.site_id, []).append(d)
         return render(request, "admin.html", user, clients=clients, sites=sites, counts=counts, error=error,
-                      client_names={c.id: c.name for c in clients})
+                      client_names={c.id: c.name for c in clients}, site_devices=site_devices)
 
 
 @router.post("/admin/clients")
@@ -498,6 +535,71 @@ def toggle_wua(request: Request, site_id: int, user: str = Depends(auth.current_
         site = s.get(Site, site_id) or _404()
         site.wua_check = not site.wua_check
     return RedirectResponse("/admin", 303)
+
+
+@router.post("/admin/sites/{site_id}/sensor")
+def set_sensor(request: Request, site_id: int, device_id: str = Form(""), user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    with session_scope() as s:
+        site = s.get(Site, site_id) or _404()
+        dev = None
+        if device_id:
+            dev = (s.get(Device, int(device_id)) if device_id.isdigit() else None) or _404()
+        try:
+            tenants.set_sensor(s, site, dev)
+        except ValueError as e:
+            return RedirectResponse("/admin?error=" + quote(str(e)), 303)
+    return RedirectResponse("/admin", 303)
+
+
+@router.get("/sites/{site_id}/network", response_class=HTMLResponse)
+def network_page(request: Request, site_id: int, show: str = "recent", user: str = Depends(auth.current_user)):
+    with session_scope() as s:
+        site = s.get(Site, site_id) or _404()
+        client = s.get(Client, site.client_id)
+        now, interval = utcnow(), get_settings().sensor_interval_minutes
+        q = select(NetworkHost).where(NetworkHost.site_id == site_id)
+        if show != "all":
+            q = q.where(NetworkHost.last_seen >= now - RECENT)
+        hosts = s.scalars(q).all()
+        issues = s.execute(select(NetworkIssue, NetworkHost).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
+                           .where(NetworkHost.site_id == site_id, NetworkIssue.status == "open", sensor.issue_clause())
+                           .order_by(NetworkIssue.cvss.desc().nulls_last(), NetworkHost.ip)).all()
+        open_by_host: dict[int, int] = {}
+        for _, h in issues:
+            open_by_host[h.id] = open_by_host.get(h.id, 0) + 1
+        notes: dict[int, list[str]] = {}
+        for i in s.scalars(select(NetworkIssue).join(NetworkHost, NetworkHost.id == NetworkIssue.host_id)
+                           .where(NetworkHost.site_id == site_id, NetworkIssue.status == "open", NetworkIssue.cvss <= 0)
+                           .order_by(NetworkIssue.title)):
+            if i.title not in notes.setdefault(i.host_id, []):
+                notes[i.host_id].append(i.title)
+        ids = [h.device_id for h in hosts if h.device_id]
+        devices = {d.id: d for d in s.scalars(select(Device).where(Device.id.in_(ids)))} if ids else {}
+        rows = [{"host": h, "new": sensor.is_new(h, site, now), "device": devices.get(h.device_id), "issues": open_by_host.get(h.id, 0),
+                 "notes": notes.get(h.id, []), "online": site.sensor_scan_at is not None and h.last_seen >= site.sensor_scan_at} for h in hosts]
+        # New first, then unmanaged, then managed; by address within each.
+        rows.sort(key=lambda r: (not r["new"], r["device"] is not None, _ip_key(r["host"].ip)))
+        return render(request, "network.html", user, site=site, client=client, rows=rows, issues=issues, show=show,
+                      sensor_dev=sensor.sensor_device(s, site), silent=sensor.sensor_silent(site, interval),
+                      counts=network_counts(s, site_id=site_id), severity_of=sensor.severity, interval=interval)
+
+
+def _ip_key(ip: str) -> tuple:
+    parts = ip.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return (0, *(int(p) for p in parts))
+    return (1, ip)
+
+
+@router.post("/network/hosts/{host_id}/known")
+def toggle_known(request: Request, host_id: int, user: str = Depends(auth.current_user)):
+    auth.check_origin(request)
+    with session_scope() as s:
+        h = s.get(NetworkHost, host_id) or _404()
+        h.known = not h.known
+        site_id = h.site_id
+    return RedirectResponse(f"/sites/{site_id}/network", 303)
 
 
 def _404():

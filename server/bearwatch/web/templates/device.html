@@ -75,6 +75,25 @@
 </table></div>
 {% endif %}
 
+{% if net_hosts or is_sensor %}
+<h2>On the network</h2>
+{% if is_sensor %}<p class="muted">This PC is the network sensor for {{ site.name }}. <a href="/sites/{{ site.id }}/network">See what it found</a>.</p>{% endif %}
+{% if net_hosts %}
+<p class="muted">What the site's sensor sees of this PC from the network:
+  {% for h in net_hosts %}<span class="mono">{{ h.ip }}</span>{% if h.ports %} with {% for p in h.ports %}{{ p.port }}{% if p.service %} {{ p.service }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %} open{% else %} with no common ports open{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
+{% if net_issues %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Severity</th><th>Problem</th><th class="num">Port</th><th>How to fix it</th></tr></thead>
+  <tbody>
+  {% for i in net_issues %}
+    <tr><td>{{ m.severity(severity_of(i.cvss)) }}</td><td><strong>{{ i.title }}</strong></td><td class="num mono">{{ i.port }}</td><td>{{ i.solution or "" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endif %}
+{% endif %}
+
 <h2>Windows Update cross-check</h2>
 {% if cross is none %}
 <p class="muted">Not run on this device. Turn it on for the site under <a href="/admin">Clients and sites</a>. It runs weekly at most, only when the PC is idle and on AC power.</p>

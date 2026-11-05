@@ -6,6 +6,8 @@
 //! - Installed KBs: Component Based Servicing packages in state Installed or Permanent
 //! - Programs: the Uninstall keys (64-bit, 32-bit, and each loaded user hive)
 //! - Settings for the server's posture rules: see posture.rs
+//! - MAC addresses of the adapters that are up (sensor/adapters.rs), so the server can tell
+//!   which hosts in a sensor scan are managed PCs
 
 use std::collections::BTreeSet;
 
@@ -58,6 +60,9 @@ pub struct Inventory {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pending_kbs: Vec<String>,
     pub software: Vec<Program>,
+    /// Lowercase `aa:bb:cc:dd:ee:ff`, sorted. Adapters that are down are left out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub macs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wua: Option<WuaResult>,
     /// Only once the server has sent a read list.
@@ -219,16 +224,28 @@ pub fn software() -> Vec<Program> {
 pub fn collect(wua: Option<WuaResult>, reads: Option<(&str, &[String])>) -> Result<Inventory> {
     let (kbs, pending_kbs) = kbs();
     let posture = reads.map(|(hash, list)| posture::collect(hash, list));
-    let mut inv = Inventory { hash: String::new(), agent_version: VERSION, hostname: hostname(), os: os_info()?, kbs, pending_kbs, software: software(), wua, posture };
+    let mut inv = Inventory {
+        hash: String::new(),
+        agent_version: VERSION,
+        hostname: hostname(),
+        os: os_info()?,
+        kbs,
+        pending_kbs,
+        software: software(),
+        macs: crate::sensor::adapters::macs(),
+        wua,
+        posture,
+    };
     inv.hash = hash(&inv)?;
     Ok(inv)
 }
 
 /// SHA-256 of everything except the hash itself. Lists are sorted, so the same PC state
-/// always produces the same hash and an unchanged PC never uploads.
+/// always produces the same hash and an unchanged PC never uploads. The MACs are part of it,
+/// so an agent upgraded to 0.3.0 uploads once and the server learns them.
 fn hash(inv: &Inventory) -> Result<String> {
     let mut h = Sha256::new();
-    h.update(serde_json::to_vec(&(&inv.hostname, &inv.os, &inv.kbs, &inv.pending_kbs, &inv.software, &inv.wua, &inv.posture))?);
+    h.update(serde_json::to_vec(&(&inv.hostname, &inv.os, &inv.kbs, &inv.pending_kbs, &inv.software, &inv.macs, &inv.wua, &inv.posture))?);
     Ok(h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect())
 }
 

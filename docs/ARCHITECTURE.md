@@ -32,7 +32,7 @@ Windows endpoints                     Client site LAN                Internet
 | Schema migrations (Alembic) | **Phase 1, built** | `server/bearwatch/migrations/` |
 | Risk score, fix deadlines, exceptions | **Phase 2, built** | `server/bearwatch/scoring.py`, [scoring.md](scoring.md) |
 | Posture checks (Windows settings) | **Phase 2, built** | `server/bearwatch/posture.py`, `intel/posture_rules.toml`, `agent/src/posture.rs`, [posture.md](posture.md) |
-| Sensor mode, unmanaged devices | Phase 2 | |
+| Sensor mode, unmanaged devices, network issues | **Phase 2, built** | `server/bearwatch/sensor.py`, `agent/src/sensor/`, [sensor.md](sensor.md) |
 | External monitoring, HaloPSA, monthly PDF | Phase 3 | |
 
 ## Two matching paths, never mixed
@@ -115,6 +115,7 @@ products and need the KB list from WMI or servicing session data).
 | `POST /api/agent/heartbeat` | device token | Returns whether to upload, collect now (rescan button), or run the Windows Update check. |
 | `POST /api/agent/inventory` | device token | Gzip JSON, 8 MB decompressed cap, schema-validated. Stored, then matched by the worker within 30 s. |
 | `POST /api/agent/posture` | device token | The settings values the posture rules read. Fetched only when the heartbeat's posture hash changes. |
+| `POST /api/agent/sensor` | device token, gzip | A network scan from the site's sensor PC (agent 0.3.0+). Any other PC gets 409. See [sensor.md](sensor.md). |
 
 - Enrollment keys and device tokens are 32 random bytes; the server stores only SHA-256.
 - The agent requires `https://` (plain http only for localhost) and uses Windows' own TLS stack
@@ -164,7 +165,7 @@ server/                 Python package `bearwatch` + tests + Dockerfile
   bearwatch/web/        dashboard templates and static files
 agent/                  Rust agent, Dockerfile (cross-compile), build.ps1
 intel/                  curated data checked into git (cpe_overrides.json, posture_rules.toml)
-docs/                   this file, scoring.md, posture.md
+docs/                   this file, scoring.md, posture.md, sensor.md
 shared-scan/            (Phase 3) package extracted from Cyber Scan
 ```
 
@@ -190,3 +191,5 @@ runs `upgrade head` at startup under a Postgres advisory lock. Databases created
 - Exploit-module signals (Nuclei templates, Metasploit) are not ingested yet.
 - Code signing and an MSI for the agent.
 - The refreshed offline database export for desktop Proton.
+- Network issues have no fix deadlines or exceptions yet, and are not in the risk score.
+- Sensor scans IPv4 only.

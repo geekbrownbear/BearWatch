@@ -26,12 +26,12 @@ class Settings(BaseSettings):
     overrides_path: Path = Path(__file__).resolve().parents[2] / "intel" / "cpe_overrides.json"
     # Windows settings checks sent to agents (docs/posture.md).
     posture_rules_path: Path = Path(__file__).resolve().parents[2] / "intel" / "posture_rules.toml"
-
     # Agent schedule, sent to agents on every heartbeat so it can change without a redeploy.
     heartbeat_seconds: int = 900  # 15 min: one small request
     collect_seconds: int = 14400  # 4 h: read registry, upload only if the hash changed
     inventory_refresh_days: int = 7  # force an upload this often even if nothing changed
     wua_interval_days: int = 7  # Windows Update cross-check, on sites that enable it
+    sensor_interval_minutes: int = 240  # network scan by the site's sensor PC (agent 0.3.0+)
 
     # Dashboard sign-in. "cloudflare": trust only a valid Cloudflare Access JWT (production).
     # "token": sign in with BEARWATCH_API_TOKEN (local development).

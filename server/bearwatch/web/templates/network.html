@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Network at {{ site.name }} · BearWatch{% endblock %}
+{% block main %}
+<p class="eyebrow"><a href="/clients/{{ client.id }}">{{ client.name }}</a> · {{ site.name }}</p>
+<h1>Network</h1>
+
+{% if not sensor_dev %}
+<div class="notice">This site has no sensor. Pick an enrolled PC to scan its network on <a href="/admin">Clients and sites</a>.
+  The PC needs agent 0.3.0 or later and must stay on.</div>
+{% elif site.sensor_scan_at is none %}
+<div class="notice">Waiting for the first scan from <a href="/devices/{{ sensor_dev.id }}">{{ sensor_dev.hostname }}</a>.
+  It starts at the agent's next check-in, within about 15 minutes, and takes a few minutes.</div>
+{% elif silent %}
+<div class="notice error">The sensor, <a href="/devices/{{ sensor_dev.id }}">{{ sensor_dev.hostname }}</a>, has not sent a scan since
+  {{ ago(site.sensor_scan_at) }}. It should scan every {{ (interval / 60) | round(1) | replace(".0", "") }} hours. Check that the PC is on and its agent is 0.3.0 or later.</div>
+{% else %}
+<p class="muted">Scanned by <a href="/devices/{{ sensor_dev.id }}">{{ sensor_dev.hostname }}</a> {{ ago(site.sensor_scan_at) }}.
+  It scans every {{ (interval / 60) | round(1) | replace(".0", "") }} hours. The scan only reads what devices show to anyone on the network; it changes nothing.</p>
+{% endif %}
+
+<div class="tiles">
+  <div class="tile"><div class="n">{{ counts.net_hosts }}</div><div class="l">Devices seen (30 days)</div></div>
+  <div class="tile {% if counts.net_unmanaged %}warn{% endif %}"><div class="n">{{ counts.net_unmanaged }}</div><div class="l">Without the agent</div></div>
+  <div class="tile {% if counts.net_new %}alert{% endif %}"><div class="n">{{ counts.net_new }}</div><div class="l">New this week</div></div>
+  <div class="tile {% if counts.net_issues %}alert{% endif %}"><div class="n">{{ counts.net_issues }}</div><div class="l">Open network issues</div></div>
+</div>
+
+<h2>Network issues</h2>
+{% if issues %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Severity</th><th>Problem</th><th>Device</th><th class="num">Port</th><th>What the scan saw</th><th>How to fix it</th><th>Since</th></tr></thead>
+  <tbody>
+  {% for i, h in issues %}
+    <tr>
+      <td>{{ m.severity(severity_of(i.cvss)) }}{% if i.cvss is not none %} <span class="muted mono">{{ "%.1f" | format(i.cvss) }}</span>{% endif %}</td>
+      <td><strong>{{ i.title }}</strong> <span class="muted mono">{{ i.check_id }}</span></td>
+      <td>{{ h.name or h.ip }} <span class="muted mono">{{ h.ip }}</span></td>
+      <td class="num mono">{{ i.port }}</td>
+      <td class="muted">{{ i.evidence or "" }}</td>
+      <td>{{ i.solution or "" }}</td>
+      <td>{{ ago(i.first_seen) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="table-wrap"><p class="empty">No open network issues.</p></div>
+{% endif %}
+
+<h2>Devices on the network</h2>
+<p class="muted">New devices come first, then devices without the agent. A device is matched to an enrolled PC by its network adapter address or its name.
+  {% if show == "all" %}<a href="/sites/{{ site.id }}/network">Show the last 30 days only</a>{% else %}<a href="/sites/{{ site.id }}/network?show=all">Show every device ever seen</a>{% endif %}</p>
+{% if rows %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Status</th><th>Name</th><th>Address</th><th>Hardware address</th><th>Maker</th><th>Open ports</th><th class="num">Issues</th><th>First seen</th><th>Last seen</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    {% set h = r.host %}
+    <tr{% if not r.online %} class="dim"{% endif %}>
+      <td>
+        {% if r.device %}<a class="badge ok" href="/devices/{{ r.device.id }}">Agent</a>
+        {% elif r.new %}<span class="badge t1">New</span>
+        {% elif h.known %}<span class="badge t4">Known</span>
+        {% else %}<span class="badge t3">No agent</span>{% endif %}
+      </td>
+      <td>{% if r.device %}<a href="/devices/{{ r.device.id }}"><strong>{{ r.device.hostname }}</strong></a>{% else %}<strong>{{ h.name or "" }}</strong>{% endif %}
+        {% if h.workgroup %}<span class="muted">{{ h.workgroup }}</span>{% endif %}</td>
+      <td class="mono">{{ h.ip }}</td>
+      <td class="mono">{{ h.mac or "" }}</td>
+      <td>{{ h.vendor or "" }}</td>
+      <td><span class="mono">{% for p in h.ports %}<span title="{{ p.banner or '' }}">{{ p.port }}{% if p.service and p.service != "unknown" %} {{ p.service }}{% endif %}{% if p.ip and p.ip != h.ip %} on {{ p.ip }}{% endif %}</span>{% if not loop.last %}, {% endif %}{% endfor %}</span>
+        {% if r.notes %}<br><span class="muted">{{ r.notes | join("; ") }}</span>{% endif %}</td>
+      <td class="num">{% if r.issues %}<span class="bad">{{ r.issues }}</span>{% else %}0{% endif %}</td>
+      <td>{{ ago(h.first_seen) }}</td>
+      <td>{{ "In the last scan" if r.online else ago(h.last_seen) }}</td>
+      <td>{% if not r.device %}<form class="inline" method="post" action="/network/hosts/{{ h.id }}/known"><button class="link" type="submit">{{ "Not known" if h.known else "Mark as known" }}</button></form>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="table-wrap"><p class="empty">No devices found yet.</p></div>
+{% endif %}
+{% endblock %}
