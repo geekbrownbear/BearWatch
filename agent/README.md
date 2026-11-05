@@ -58,6 +58,10 @@ them with their open ports and any risky settings.
   anonymous FTP or MQTT, Telnet, and login pages over plain HTTP. They are non-destructive:
   they only read what a service offers to anyone who connects, or try the documented
   anonymous access, then disconnect. Nothing is written, changed or exploited.
+  Requests go only to services identified by their port or their greeting. Printing ports
+  (515, 9100 to 9102) are only connected to, never written to, because a printer prints
+  whatever arrives there. When a check cannot finish (timeout, no answer), the port is listed
+  in the host's `unchecked_ports`, so the server keeps its earlier issues open.
 - **How often:** every `interval_minutes` from the plan. The scan runs on its own thread, so
   heartbeats and service stops never wait for it. A failed scan or upload is retried at the
   next interval. If the server answers that this PC is no longer the sensor, it stops until
