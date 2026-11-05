@@ -137,9 +137,15 @@ def match_device(h: NetworkHost, by_mac: dict[str, int], by_name: dict[str, int]
 
 
 def store(s: Session, site: Site, rep: Report) -> int:
-    """Record one scan. Returns the number of hosts in it."""
+    """Record one scan. Returns the number of hosts in it.
+
+    A report that scanned no network (no usable adapter, or adapter lookup failed) is not a
+    scan: it stores nothing and moves neither the last-scan time nor the baseline, so the site
+    still shows the sensor as silent and a later real first scan is still the baseline."""
+    if not rep.networks:
+        return 0
     now = utcnow()
-    existing = {h.key: h for h in s.scalars(select(NetworkHost).where(NetworkHost.site_id == site.id))}
+    existing ={h.key: h for h in s.scalars(select(NetworkHost).where(NetworkHost.site_id == site.id))}
     by_mac, by_name = _managed(s, site)
     seen: set[str] = set()
     for h in rep.hosts:

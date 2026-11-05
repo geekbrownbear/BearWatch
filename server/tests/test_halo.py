@@ -9,7 +9,7 @@ from sqlalchemy import select
 from bearwatch import config, db, halo, tenants
 from bearwatch.cli import main as cli
 from bearwatch.intel.common import utcnow
-from bearwatch.models import Device, Finding, HaloTicket
+from bearwatch.models import Device, Finding, FindingException, HaloTicket
 
 HALO = "https://halo.example.test"
 
@@ -83,7 +83,7 @@ def test_ticket_lifecycle(session, monkeypatch):
 
     respx.post(f"{HALO}/api/tickets").mock(side_effect=on_tickets)
     respx.post(f"{HALO}/api/actions").mock(side_effect=on_actions)
-    status = respx.get(f"{HALO}/api/tickets/101").mock(return_value=httpx.Response(200, json={"id": 101, "status_id": 2}))
+    status = respx.get(url__regex=rf"{HALO}/api/tickets/\d+").mock(return_value=httpx.Response(200, json={"status_id": 2}))
 
     api = halo.api_from_settings()
     assert isinstance(api, halo.HaloApi)
@@ -138,7 +138,7 @@ def test_ticket_lifecycle(session, monkeypatch):
         halo.sync(s, api)
         row = s.scalars(select(HaloTicket).where(HaloTicket.fix_key == "kb:5070001", HaloTicket.client_id == c.id)).one()
         assert row.status == "open" and row.halo_id != 101
-    assert status.call_count == 1
+    assert status.call_count >= 3  # open tickets are checked in Halo every pass
 
 
 @respx.mock
@@ -184,5 +184,66 @@ def test_empty_compose_variables_mean_unset(monkeypatch):
 
 
 def test_summary_is_short():
-    g = halo.Group("k", "Update " + "Very Long Application Name " * 5, 4, 60.0, None, ["A"], [])
+    g = halo.Group("k", "Update " + "Very Long Application Name " * 5, 4, 60.0, None, {1: "A (Office)"}, [])
     assert len(halo._summary(g)) <= halo.SUMMARY_MAX and halo._summary(g).endswith("...")
+
+
+@respx.mock
+def test_codex_review_cases(session, monkeypatch):
+    """Exceptions don't make a fix urgent; same-named PCs count twice; a tier change updates the
+    ticket; a ticket closed in Halo is noticed even when nothing changed here."""
+    _settings(monkeypatch, BEARWATCH_HALO_DRY_RUN="false")
+    respx.post(f"{HALO}/auth/token").mock(return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600}))
+    ids = iter(range(500, 600))
+    sent = []
+
+    def on_tickets(request):
+        body = json.loads(request.content)[0]
+        sent.append(body)
+        return httpx.Response(201, json={**body, "id": body.get("id") or next(ids)})
+
+    respx.post(f"{HALO}/api/tickets").mock(side_effect=on_tickets)
+    respx.post(f"{HALO}/api/actions").mock(return_value=httpx.Response(201, json={"id": 1}))
+    remote = respx.get(url__regex=rf"{HALO}/api/tickets/\d+")
+    remote.mock(return_value=httpx.Response(200, json={"status_id": 2}))
+    api = halo.api_from_settings()
+    with db.session_scope() as s:
+        c, devs = _setup(s)
+        other_site, _ = tenants.create_site(s, c, "Branch")
+        twin = Device(site_id=other_site.id, machine_guid="e" * 32, hostname="PC-A", token_hash="e" * 64, enrolled_at=utcnow())
+        s.add(twin)
+        s.flush()
+        # Excepted known-exploited finding plus a low-risk one: no ticket.
+
+
+        exc = FindingException(client_id=c.id, reason="false_positive", note="x", created_by="t", created_at=utcnow(),
+                               expires_on=(utcnow() + timedelta(days=30)).date())
+        s.add(exc)
+        s.flush()
+        f = _finding(s, devs[0], "app:quiet", "CVE-2026-5000", tier=1, risk=90)
+        f.exception_id = exc.id
+        _finding(s, devs[1], "app:quiet", "CVE-2026-5001", risk=5)
+        # Two PCs named PC-A at two sites: both listed.
+        _finding(s, devs[0], "kb:2", "CVE-2026-6000", risk=60)
+        _finding(s, twin, "kb:2", "CVE-2026-6000", risk=60)
+        assert halo.sync(s, api) == 1
+    assert [b["summary"] for b in sent] == ["BearWatch: Install kb:2"]
+    assert "2 PCs need" in sent[0]["details"] and "PC-A (Office)" in sent[0]["details"] and "PC-A (Branch)" in sent[0]["details"]
+
+    # The CVE becomes known exploited: same PCs and CVEs, but the ticket is rewritten.
+    sent.clear()
+    with db.session_scope() as s:
+        for f in s.scalars(select(Finding).where(Finding.fix_key == "kb:2")):
+            f.exploit_tier = 1
+        assert halo.sync(s, api) == 1
+    assert "known exploited" in sent[0]["details"]
+
+    # Closed by hand in Halo with nothing changed here: noticed, and a new ticket next pass.
+    remote.mock(return_value=httpx.Response(200, json={"status_id": 9}))
+    with db.session_scope() as s:
+        halo.sync(s, api)
+        assert s.scalars(select(HaloTicket).where(HaloTicket.fix_key == "kb:2")).one().status == "closed"
+        remote.mock(return_value=httpx.Response(200, json={"status_id": 2}))
+        halo.sync(s, api)
+        row = s.scalars(select(HaloTicket).where(HaloTicket.fix_key == "kb:2")).one()
+        assert row.status == "open" and row.halo_id == 501

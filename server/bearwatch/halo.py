@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -129,34 +129,38 @@ def configured() -> bool:
 class Group:
     fix_key: str
     label: str
-    tier: int
+    tier: int  # from findings without an exception only
     risk: float
     due: datetime | None
-    devices: list[str]
+    devices: dict[int, str]  # device id -> "HOSTNAME (site)"; ids, since hostnames can repeat
     cves: list[str]
 
     @property
     def digest(self) -> str:
-        return hashlib.sha256("|".join(self.devices + ["#"] + self.cves).encode()).hexdigest()
+        """Everything the ticket shows: a change in any of it rewrites the ticket."""
+        parts = [str(i) for i in sorted(self.devices)] + ["#"] + self.cves + ["#", str(self.tier), self.due.isoformat() if self.due else "-"]
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+    @property
+    def device_names(self) -> list[str]:
+        return sorted(self.devices.values(), key=str.lower)
 
 
 def open_groups(s: Session, client_id: int) -> dict[str, Group]:
-    q = (select(Finding, Device.hostname).join(Device, Device.id == Finding.device_id).join(Site, Site.id == Device.site_id)
+    q = (select(Finding, Device.hostname, Site.name).join(Device, Device.id == Finding.device_id).join(Site, Site.id == Device.site_id)
          .where(Site.client_id == client_id, Finding.status == "open"))
     groups: dict[str, Group] = {}
-    for f, host in s.execute(q):
-        g = groups.setdefault(f.fix_key, Group(f.fix_key, f.fix_label, f.exploit_tier, 0.0, None, [], []))
-        g.tier = min(g.tier, f.exploit_tier)
-        if f.exception_id is None:  # an excepted finding doesn't make the fix urgent
+    for f, host, site in s.execute(q):
+        g = groups.setdefault(f.fix_key, Group(f.fix_key, f.fix_label, 4, 0.0, None, {}, []))
+        if f.exception_id is None:  # an excepted finding (false positive, accepted risk) doesn't make the fix urgent
+            g.tier = min(g.tier, f.exploit_tier)
             g.risk = max(g.risk, f.risk or 0.0)
             if f.due_at is not None and (g.due is None or f.due_at < g.due):
                 g.due = f.due_at
-        if host not in g.devices:
-            g.devices.append(host)
+        g.devices[f.device_id] = f"{host} ({site})"
         if f.source != "posture" and f.cve_id not in g.cves:
             g.cves.append(f.cve_id)
     for g in groups.values():
-        g.devices.sort(key=str.lower)
         g.cves.sort()
     return groups
 
@@ -172,7 +176,7 @@ def _details(g: Group, client: Client, base_url: str) -> str:
         lines.append(f"Fix by: {g.due:%B} {g.due.day}, {g.due.year}")
     if g.tier == 1:
         lines.append("Attackers are using at least one of these vulnerabilities now (known exploited).")
-    lines += ["", "PCs:"] + [f"- {h}" for h in g.devices]
+    lines += ["", "PCs:"] + [f"- {h}" for h in g.device_names]
     if g.cves:
         shown = g.cves[:40]
         lines += ["", f"Vulnerabilities ({len(g.cves)}):", ", ".join(shown) + (" and more" if len(g.cves) > len(shown) else "")]
@@ -190,9 +194,20 @@ def _summary(g: Group) -> str:
 # --- the sync --------------------------------------------------------------------------------
 
 
+LOCK_KEY = 0x48414C4F  # "HALO": one sync at a time across the worker and the CLI
+
+
+def _lock(s: Session) -> None:
+    """Serialize syncs, so the worker and `bearwatch halo sync` can't both see no ticket and both
+    create one. Held until the transaction ends. SQLite (tests) has one writer anyway."""
+    if s.get_bind().dialect.name == "postgresql":
+        s.execute(text("select pg_advisory_xact_lock(:k)"), {"k": LOCK_KEY})
+
+
 def sync(s: Session, api) -> int:
     """Create, update and close tickets for every client with a Halo client id. Returns how many
     tickets were touched. One failing ticket is recorded on its row and does not stop the rest."""
+    _lock(s)
     cfg, now = get_settings(), utcnow()
     touched = 0
     for client in s.scalars(select(Client).where(Client.halo_client_id.is_not(None))):
@@ -213,11 +228,11 @@ def sync(s: Session, api) -> int:
                         s.add(row)
                     row.halo_id, row.status, row.digest, row.opened_at, row.closed_at = hid, "open", g.digest, now, None
                     touched += 1
+                elif not api.ticket_open(row.halo_id, cfg.halo_closed_status_id):
+                    # A technician closed it in Halo while PCs still need the fix: open a new one next pass.
+                    row.status, row.closed_at = "closed", now
+                    continue
                 elif row.digest != g.digest:
-                    if not api.ticket_open(row.halo_id, cfg.halo_closed_status_id):
-                        # A technician closed it in Halo while PCs still need the fix: open a new one next pass.
-                        row.status, row.closed_at = "closed", now
-                        continue
                     api.update_ticket(row.halo_id, {"details": _details(g, client, cfg.public_url)})
                     api.add_note(row.halo_id, f"BearWatch: the list changed. {len(g.devices)} "
                                               f"{'PC still needs' if len(g.devices) == 1 else 'PCs still need'} this fix.",

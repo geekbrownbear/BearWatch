@@ -37,7 +37,8 @@ written, changed or exploited.
 
 The scan runs every 4 hours (`BEARWATCH_SENSOR_INTERVAL_MINUTES`). If no scan arrives for two
 intervals plus an hour, the site shows the sensor as silent: a silent sensor is never shown as
-"nothing found".
+"nothing found". A report in which the PC could scan no network (no usable adapter) does not
+count as a scan.
 
 ## What it scans
 
