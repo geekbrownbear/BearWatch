@@ -7,14 +7,20 @@ FIRST EPSS, CISA vulnrichment, WinGet), matches it against what is installed on 
 endpoints, ranks findings by real-world exploitability and groups them by the fix that closes
 them.
 
-**Status: Phase 2 in progress.** A light Windows agent (0.9 MB, about 10 MB of memory, uploads
+**Status: Phases 0 to 3 built.** A light Windows agent (0.9 MB, about 10 MB of memory, uploads
 only when something changes) reports to the server, which keeps findings with found and fixed
 history and shows them on a fix-grouped dashboard behind Cloudflare Access. Every finding has a
 risk score that shows how it was reached, a fix deadline, and can be covered by an exception
 with a reason and an end date. Posture checks flag risky Windows settings (SMBv1, LLMNR, no
-LAPS and more) from rules kept on the server. Sensor mode and PSA integration come next. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/scoring.md](docs/scoring.md),
-[docs/posture.md](docs/posture.md) and [agent/README.md](agent/README.md).
+LAPS and more) from rules kept on the server. In sensor mode, one agent per site sweeps its
+network and lists unmanaged devices and network issues. Each client gets a monthly PDF report,
+passive checks of its public domains and IPs (Shodan InternetDB, SPF, DMARC, DNSSEC,
+certificates), and optional HaloPSA tickets, one per fix. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what is built and what is not done yet, plus
+[docs/scoring.md](docs/scoring.md), [docs/posture.md](docs/posture.md),
+[docs/sensor.md](docs/sensor.md), [docs/report.md](docs/report.md),
+[docs/external.md](docs/external.md), [docs/halo.md](docs/halo.md) and
+[agent/README.md](agent/README.md).
 
 ## Run it locally
 
